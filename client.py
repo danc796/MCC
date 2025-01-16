@@ -73,53 +73,46 @@ class MCCClient(ctk.CTk):
         self.create_network_tab()
 
     def create_monitoring_tab(self):
-        """Create the monitoring tab with disk I/O"""
+        """Create the monitoring tab with improved widget management"""
         monitoring_frame = ctk.CTkFrame(self.notebook)
         self.notebook.add(monitoring_frame, text="Monitoring")
 
-        # Top section for usage metrics
+        # Top section for CPU and Memory in a single frame
         top_section = ctk.CTkFrame(monitoring_frame)
         top_section.pack(fill=tk.X, padx=10, pady=5)
 
         # CPU Usage
-        cpu_frame = ctk.CTkFrame(top_section)
-        cpu_frame.pack(fill=tk.X, pady=2)
-        ctk.CTkLabel(cpu_frame, text="CPU Usage:").pack(side=tk.LEFT, padx=5)
-        self.cpu_progress = ctk.CTkProgressBar(cpu_frame)
+        self.cpu_frame = ctk.CTkFrame(top_section)
+        self.cpu_frame.pack(fill=tk.X, pady=5)
+        self.cpu_label_text = ctk.CTkLabel(self.cpu_frame, text="CPU Usage:")
+        self.cpu_label_text.pack(side=tk.LEFT, padx=5)
+        self.cpu_progress = ctk.CTkProgressBar(self.cpu_frame)
         self.cpu_progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         self.cpu_progress.set(0)
-        self.cpu_label = ctk.CTkLabel(cpu_frame, text="0%")
+        self.cpu_label = ctk.CTkLabel(self.cpu_frame, text="0%")
         self.cpu_label.pack(side=tk.LEFT, padx=5)
 
         # Memory Usage
-        mem_frame = ctk.CTkFrame(top_section)
-        mem_frame.pack(fill=tk.X, pady=2)
-        ctk.CTkLabel(mem_frame, text="Memory Usage:").pack(side=tk.LEFT, padx=5)
-        self.mem_progress = ctk.CTkProgressBar(mem_frame)
+        self.mem_frame = ctk.CTkFrame(top_section)
+        self.mem_frame.pack(fill=tk.X, pady=5)
+        self.mem_label_text = ctk.CTkLabel(self.mem_frame, text="Memory Usage:")
+        self.mem_label_text.pack(side=tk.LEFT, padx=5)
+        self.mem_progress = ctk.CTkProgressBar(self.mem_frame)
         self.mem_progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         self.mem_progress.set(0)
-        self.mem_label = ctk.CTkLabel(mem_frame, text="0%")
+        self.mem_label = ctk.CTkLabel(self.mem_frame, text="0%")
         self.mem_label.pack(side=tk.LEFT, padx=5)
 
-        # Disk I/O Usage
-        disk_io_frame = ctk.CTkFrame(top_section)
-        disk_io_frame.pack(fill=tk.X, pady=2)
-        ctk.CTkLabel(disk_io_frame, text="Disk Usage:").pack(side=tk.LEFT, padx=5)
-        self.disk_io_progress = ctk.CTkProgressBar(disk_io_frame)
-        self.disk_io_progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.disk_io_progress.set(0)
-        self.disk_io_label = ctk.CTkLabel(disk_io_frame, text="0%")
-        self.disk_io_label.pack(side=tk.LEFT, padx=5)
+        # Container frame for disk usage
+        self.disk_container = ctk.CTkFrame(monitoring_frame)
+        self.disk_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        # Disk Usage Section
-        disk_section = ctk.CTkFrame(monitoring_frame)
-        disk_section.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        # Label for disk section
+        self.disk_label = ctk.CTkLabel(self.disk_container, text="Disk Usage:")
+        self.disk_label.pack(anchor=tk.W, padx=5, pady=5)
 
-        # Add a label for the disk section
-        ctk.CTkLabel(disk_section, text="Storage Usage:").pack(anchor=tk.W, padx=5, pady=5)
-
-        # Create a scrollable frame for disk information
-        self.disk_frame = ctk.CTkFrame(disk_section)
+        # Scrollable frame for disk information
+        self.disk_frame = ctk.CTkFrame(self.disk_container)
         self.disk_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
     def create_software_tab(self):
@@ -396,8 +389,9 @@ class MCCClient(ctk.CTk):
             return None
 
     def update_hardware_info(self, data):
-        """Update hardware monitoring displays with disk I/O"""
+        """Update hardware monitoring displays with Task Manager style disk info"""
         try:
+            # Update CPU usage
             cpu_percent = data.get('cpu_percent', 0)
             self.cpu_progress.configure(mode="determinate")
             self.cpu_progress.set(cpu_percent / 100.0)
@@ -409,13 +403,6 @@ class MCCClient(ctk.CTk):
             self.mem_progress.configure(mode="determinate")
             self.mem_progress.set(memory_percent / 100.0)
             self.mem_label.configure(text=f"{memory_percent:.1f}%")
-
-            # Update disk I/O usage
-            disk_io_data = data.get('disk_io', {})
-            disk_io_percent = disk_io_data.get('percent', 0)
-            self.disk_io_progress.configure(mode="determinate")
-            self.disk_io_progress.set(disk_io_percent / 100.0)
-            self.disk_io_label.configure(text=f"{disk_io_percent:.1f}%")
 
             # Clear existing disk information
             for widget in self.disk_frame.winfo_children():
