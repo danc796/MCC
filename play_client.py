@@ -6,19 +6,16 @@ import threading
 from cryptography.fernet import Fernet
 import customtkinter as ctk
 import time
+import os
 
 
 class MCCClient(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        # Initialize connection settings
-        self.server_host = 'localhost'
-        self.server_port = 5000
-        self.socket = None
-        self.connected = False
-        self.encryption_key = None
-        self.cipher_suite = None
+        # Initialize connection management
+        self.connections = {}  # Dictionary to store all connections
+        self.active_connection = None  # Currently selected connection
 
         # Configure the window
         self.title("Multi Computers Control")
@@ -30,27 +27,44 @@ class MCCClient(ctk.CTk):
 
         self.create_gui()
         self.initialize_monitoring()
-        self.connect_to_server()
 
     def create_gui(self):
-        """Create the main GUI interface"""
+        """Create the main GUI with connection management"""
         # Create main container
         self.main_container = ctk.CTkFrame(self)
         self.main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # Create sidebar for computer list
-        self.sidebar = ctk.CTkFrame(self.main_container, width=200)
+        # Create sidebar for computer list and connection management
+        self.sidebar = ctk.CTkFrame(self.main_container, width=250)
         self.sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
 
-        # Create computer list
-        self.computer_list = ctk.CTkTextbox(self.sidebar, width=200)
-        self.computer_list.pack(fill=tk.BOTH, expand=True)
+        # Add connection controls
+        connection_frame = ctk.CTkFrame(self.sidebar)
+        connection_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        self.host_entry = ctk.CTkEntry(connection_frame, placeholder_text="IP Address")
+        self.host_entry.pack(fill=tk.X, padx=5, pady=2)
+
+        self.port_entry = ctk.CTkEntry(connection_frame, placeholder_text="Port (default: 5000)")
+        self.port_entry.pack(fill=tk.X, padx=5, pady=2)
+
+        btn_frame = ctk.CTkFrame(connection_frame)
+        btn_frame.pack(fill=tk.X, padx=5, pady=2)
+
+        ctk.CTkButton(btn_frame, text="Connect", command=self.add_connection).pack(side=tk.LEFT, padx=2)
+        ctk.CTkButton(btn_frame, text="Disconnect", command=self.remove_connection).pack(side=tk.LEFT, padx=2)
+
+        # Create computer list with selection capability
+        self.computer_list = ttk.Treeview(self.sidebar, columns=("status",), show="tree headings")
+        self.computer_list.heading("#0", text="Computers")
+        self.computer_list.heading("status", text="Status")
+        self.computer_list.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.computer_list.bind('<<TreeviewSelect>>', self.on_computer_select)
 
         # Create main content area with tabs
         self.notebook = ttk.Notebook(self.main_container)
         self.notebook.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Create tabs
         self.create_monitoring_tab()
         self.create_software_tab()
         self.create_power_tab()
@@ -59,54 +73,123 @@ class MCCClient(ctk.CTk):
         self.create_network_tab()
 
     def create_monitoring_tab(self):
-        """Create the monitoring tab"""
+        """Create the monitoring tab with disk I/O"""
         monitoring_frame = ctk.CTkFrame(self.notebook)
         self.notebook.add(monitoring_frame, text="Monitoring")
 
-        # CPU Usage
-        cpu_frame = ctk.CTkFrame(monitoring_frame)
-        cpu_frame.pack(fill=tk.X, padx=5, pady=5)
+        # Top section for usage metrics
+        top_section = ctk.CTkFrame(monitoring_frame)
+        top_section.pack(fill=tk.X, padx=10, pady=5)
 
-        ctk.CTkLabel(cpu_frame, text="CPU Usage:").pack(side=tk.LEFT)
+        # CPU Usage
+        cpu_frame = ctk.CTkFrame(top_section)
+        cpu_frame.pack(fill=tk.X, pady=2)
+        ctk.CTkLabel(cpu_frame, text="CPU Usage:").pack(side=tk.LEFT, padx=5)
         self.cpu_progress = ctk.CTkProgressBar(cpu_frame)
         self.cpu_progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         self.cpu_progress.set(0)
+        self.cpu_label = ctk.CTkLabel(cpu_frame, text="0%")
+        self.cpu_label.pack(side=tk.LEFT, padx=5)
 
         # Memory Usage
-        mem_frame = ctk.CTkFrame(monitoring_frame)
-        mem_frame.pack(fill=tk.X, padx=5, pady=5)
-
-        ctk.CTkLabel(mem_frame, text="Memory Usage:").pack(side=tk.LEFT)
+        mem_frame = ctk.CTkFrame(top_section)
+        mem_frame.pack(fill=tk.X, pady=2)
+        ctk.CTkLabel(mem_frame, text="Memory Usage:").pack(side=tk.LEFT, padx=5)
         self.mem_progress = ctk.CTkProgressBar(mem_frame)
         self.mem_progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         self.mem_progress.set(0)
+        self.mem_label = ctk.CTkLabel(mem_frame, text="0%")
+        self.mem_label.pack(side=tk.LEFT, padx=5)
 
-        # Disk Usage
-        self.disk_frame = ctk.CTkFrame(monitoring_frame)
+        # Disk I/O Usage
+        disk_io_frame = ctk.CTkFrame(top_section)
+        disk_io_frame.pack(fill=tk.X, pady=2)
+        ctk.CTkLabel(disk_io_frame, text="Disk Usage:").pack(side=tk.LEFT, padx=5)
+        self.disk_io_progress = ctk.CTkProgressBar(disk_io_frame)
+        self.disk_io_progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.disk_io_progress.set(0)
+        self.disk_io_label = ctk.CTkLabel(disk_io_frame, text="0%")
+        self.disk_io_label.pack(side=tk.LEFT, padx=5)
+
+        # Disk Usage Section
+        disk_section = ctk.CTkFrame(monitoring_frame)
+        disk_section.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # Add a label for the disk section
+        ctk.CTkLabel(disk_section, text="Storage Usage:").pack(anchor=tk.W, padx=5, pady=5)
+
+        # Create a scrollable frame for disk information
+        self.disk_frame = ctk.CTkFrame(disk_section)
         self.disk_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # System Information
-        self.system_info = ctk.CTkTextbox(monitoring_frame, height=100)
-        self.system_info.pack(fill=tk.X, padx=5, pady=5)
-
     def create_software_tab(self):
-        """Create the software management tab"""
-        software_frame = ctk.CTkFrame(self.notebook)
-        self.notebook.add(software_frame, text="Software")
+        """Create the software management tab with stable widget handling"""
+        # Main container frame
+        self.software_tab = ctk.CTkFrame(self.notebook)
+        self.notebook.add(self.software_tab, text="Software")
 
-        # Software list
-        self.software_tree = ttk.Treeview(software_frame, columns=("Name", "Version"), show="headings")
-        self.software_tree.heading("Name", text="Name")
+        # Top status frame
+        self.status_frame = ctk.CTkFrame(self.software_tab)
+        self.status_frame.pack(fill=tk.X, padx=10, pady=(5, 0))
+        self.status_label = ctk.CTkLabel(self.status_frame, text="Select a computer to view installed software")
+        self.status_label.pack(fill=tk.X, padx=5, pady=5)
+
+        # Software list frame
+        self.software_list_frame = ctk.CTkFrame(self.software_tab)
+        self.software_list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # Create and pack the Treeview with scrollbar
+        tree_container = ttk.Frame(self.software_list_frame)
+        tree_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        self.software_tree = ttk.Treeview(
+            tree_container,
+            columns=("Name", "Version"),
+            show="headings"
+        )
+
+        # Configure columns
+        self.software_tree.heading("Name", text="Software Name")
         self.software_tree.heading("Version", text="Version")
-        self.software_tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.software_tree.column("Name", width=300, minwidth=200)
+        self.software_tree.column("Version", width=100, minwidth=100)
 
-        # Control buttons
-        button_frame = ctk.CTkFrame(software_frame)
-        button_frame.pack(fill=tk.X, padx=5, pady=5)
+        # Create and configure scrollbar
+        scrollbar = ttk.Scrollbar(tree_container, orient="vertical", command=self.software_tree.yview)
+        self.software_tree.configure(yscrollcommand=scrollbar.set)
 
-        ctk.CTkButton(button_frame, text="Refresh", command=self.refresh_software_list).pack(side=tk.LEFT, padx=5)
-        ctk.CTkButton(button_frame, text="Install", command=self.install_software).pack(side=tk.LEFT, padx=5)
-        ctk.CTkButton(button_frame, text="Uninstall", command=self.uninstall_software).pack(side=tk.LEFT, padx=5)
+        # Pack the tree and scrollbar
+        self.software_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Button frame at bottom
+        button_frame = ctk.CTkFrame(self.software_tab)
+        button_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
+
+        # Create buttons using grid for better stability
+        self.refresh_btn = ctk.CTkButton(
+            button_frame,
+            text="Refresh List",
+            command=self.refresh_software_list,
+            width=120
+        )
+        self.refresh_btn.pack(side=tk.LEFT, padx=5, pady=5)
+
+        self.install_btn = ctk.CTkButton(
+            button_frame,
+            text="Install Software",
+            command=self.install_software,
+            width=120
+        )
+        self.install_btn.pack(side=tk.LEFT, padx=5, pady=5)
+
+        self.uninstall_btn = ctk.CTkButton(
+            button_frame,
+            text="Uninstall",
+            command=self.uninstall_software,
+            width=120
+        )
+        self.uninstall_btn.pack(side=tk.LEFT, padx=5, pady=5)
 
     def create_power_tab(self):
         """Create the power management tab"""
@@ -120,17 +203,6 @@ class MCCClient(ctk.CTk):
         ctk.CTkButton(button_frame, text="Shutdown", command=lambda: self.power_action("shutdown")).pack(pady=5)
         ctk.CTkButton(button_frame, text="Restart", command=lambda: self.power_action("restart")).pack(pady=5)
         ctk.CTkButton(button_frame, text="Sleep", command=lambda: self.power_action("sleep")).pack(pady=5)
-
-        # Schedule frame
-        schedule_frame = ctk.CTkFrame(power_frame)
-        schedule_frame.pack(expand=True, pady=20)
-
-        ctk.CTkLabel(schedule_frame, text="Schedule Power Action").pack()
-
-        self.schedule_time = ctk.CTkEntry(schedule_frame, placeholder_text="HH:MM")
-        self.schedule_time.pack(pady=5)
-
-        ctk.CTkButton(schedule_frame, text="Schedule", command=self.schedule_power_action).pack(pady=5)
 
     def create_file_transfer_tab(self):
         """Create the file transfer tab"""
@@ -161,10 +233,6 @@ class MCCClient(ctk.CTk):
         # Transfer button
         ctk.CTkButton(file_frame, text="Transfer", command=self.transfer_files).pack(pady=5)
 
-        # Transfer log
-        self.transfer_log = ctk.CTkTextbox(file_frame)
-        self.transfer_log.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
     def create_command_tab(self):
         """Create the command execution tab"""
         command_frame = ctk.CTkFrame(self.notebook)
@@ -183,286 +251,337 @@ class MCCClient(ctk.CTk):
         self.command_output = ctk.CTkTextbox(command_frame)
         self.command_output.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Saved commands
-        saved_frame = ctk.CTkFrame(command_frame)
-        saved_frame.pack(fill=tk.X, padx=5, pady=5)
-
-        ctk.CTkLabel(saved_frame, text="Saved Commands:").pack(side=tk.LEFT)
-        self.saved_commands = ctk.CTkComboBox(saved_frame, values=["dir", "ipconfig", "systeminfo"])
-        self.saved_commands.pack(side=tk.LEFT, padx=5)
-
-        ctk.CTkButton(saved_frame, text="Run", command=self.run_saved_command).pack(side=tk.LEFT)
-
     def create_network_tab(self):
         """Create the network monitoring tab"""
         network_frame = ctk.CTkFrame(self.notebook)
         self.notebook.add(network_frame, text="Network")
 
         # Network statistics
-        stats_frame = ctk.CTkFrame(network_frame)
-        stats_frame.pack(fill=tk.X, padx=5, pady=5)
-
-        self.network_stats = ctk.CTkTextbox(stats_frame, height=100)
-        self.network_stats.pack(fill=tk.X, expand=True)
+        self.network_stats = ctk.CTkTextbox(network_frame, height=100)
+        self.network_stats.pack(fill=tk.X, padx=5, pady=5)
 
         # Active connections
-        connections_frame = ctk.CTkFrame(network_frame)
-        connections_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-        self.connections_tree = ttk.Treeview(connections_frame,
+        self.connections_tree = ttk.Treeview(network_frame,
                                              columns=("Local", "Remote", "Status"), show="headings")
         self.connections_tree.heading("Local", text="Local Address")
         self.connections_tree.heading("Remote", text="Remote Address")
         self.connections_tree.heading("Status", text="Status")
-        self.connections_tree.pack(fill=tk.BOTH, expand=True)
+        self.connections_tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-    def connect_to_server(self):
-        """Establish connection to the server"""
+    def add_connection(self):
+        """Add a new remote connection"""
+        host = self.host_entry.get()
+        port = self.port_entry.get()
+
+        if not host:
+            messagebox.showwarning("Input Error", "Please enter an IP address")
+            return
+
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.connect((self.server_host, self.server_port))
+            port = int(port) if port else 5000
+        except ValueError:
+            messagebox.showwarning("Input Error", "Invalid port number")
+            return
 
-            # Wait for encryption key from server
-            self.encryption_key = self.socket.recv(1024)
-            if not self.encryption_key:
-                raise Exception("Did not receive encryption key from server")
+        try:
+            # Create new connection
+            new_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            new_socket.settimeout(5)  # 5 second timeout for connection
+            new_socket.connect((host, port))
 
-            self.cipher_suite = Fernet(self.encryption_key)
-            self.connected = True
+            # Receive encryption key
+            encryption_key = new_socket.recv(1024)
+            cipher_suite = Fernet(encryption_key)
 
-            # Start receive thread
-            threading.Thread(target=self.receive_data, daemon=True).start()
+            # Store connection info
+            connection_id = f"{host}:{port}"
+            self.connections[connection_id] = {
+                'socket': new_socket,
+                'cipher_suite': cipher_suite,
+                'host': host,
+                'port': port,
+                'system_info': None
+            }
 
-            messagebox.showinfo("Connection", "Successfully connected to server")
+            # Start monitoring thread for this connection
+            thread = threading.Thread(
+                target=self.monitor_connection,
+                args=(connection_id,),
+                daemon=True
+            )
+            thread.start()
+
+            # Add to computer list
+            self.computer_list.insert('', 'end', connection_id, text=host, values=('Connected',))
+
+            # Clear input fields
+            self.host_entry.delete(0, tk.END)
+            self.port_entry.delete(0, tk.END)
 
         except Exception as e:
-            self.connected = False
-            self.cipher_suite = None
             messagebox.showerror("Connection Error", f"Failed to connect: {str(e)}")
 
-    def send_command(self, command_type, data):
-        """Send encrypted command to server"""
-        if not self.connected:
-            return {'status': 'error', 'message': 'Not connected to server'}
+    def remove_connection(self):
+        """Remove selected connection"""
+        selected = self.computer_list.selection()
+        if not selected:
+            messagebox.showwarning("Selection", "Please select a computer to disconnect")
+            return
 
-        command = {
-            'type': command_type,
-            'data': data
-        }
-
-        encrypted_data = self.cipher_suite.encrypt(json.dumps(command).encode())
-        self.socket.send(encrypted_data)
-
-        # Wait for response
-        encrypted_response = self.socket.recv(4096)
-        response = json.loads(self.cipher_suite.decrypt(encrypted_response).decode())
-        return response
-
-    def receive_data(self):
-        """Handle incoming data from server"""
-        while self.connected:
+        connection_id = selected[0]
+        if connection_id in self.connections:
             try:
-                encrypted_data = self.socket.recv(4096)
-                if not encrypted_data:
-                    break
+                self.connections[connection_id]['socket'].close()
+            except:
+                pass
+            del self.connections[connection_id]
+            self.computer_list.delete(connection_id)
 
-                data = json.loads(self.cipher_suite.decrypt(encrypted_data).decode())
-                self.handle_server_data(data)
+            if self.active_connection == connection_id:
+                self.active_connection = None
+
+    def on_computer_select(self, event):
+        """Handle computer selection"""
+        selected = self.computer_list.selection()
+        if selected:
+            self.active_connection = selected[0]
+            self.refresh_monitoring()
+        else:
+            self.active_connection = None
+
+    def monitor_connection(self, connection_id):
+        """Monitor individual connection"""
+        connection = self.connections.get(connection_id)
+        if not connection:
+            return
+
+        while connection_id in self.connections:
+            try:
+                # Get system info
+                response = self.send_command(connection_id, 'system_info', {})
+                if response and response.get('status') == 'success':
+                    self.connections[connection_id]['system_info'] = response['data']
+
+                # Update status in computer list
+                self.computer_list.set(connection_id, "status", "Connected")
 
             except Exception as e:
-                print(f"Error receiving data: {str(e)}")
+                print(f"Monitoring error for {connection_id}: {str(e)}")
+                self.computer_list.set(connection_id, "status", "Error")
                 break
 
-        self.connected = False
-        messagebox.showwarning("Connection Lost", "Lost connection to server")
+            time.sleep(5)  # Check every 5 seconds
 
-    def handle_server_data(self, data):
-        """Handle different types of data from server"""
-        data_type = data.get('type')
-        if data_type == 'system_info':
-            self.update_system_info(data['data'])
-        elif data_type == 'hardware_monitor':
-            self.update_hardware_info(data['data'])
-        elif data_type == 'network_monitor':
-            self.update_network_info(data['data'])
+    def send_command(self, connection_id, command_type, data):
+        """Send command to specific connection"""
+        connection = self.connections.get(connection_id)
+        if not connection:
+            return None
 
-    def initialize_monitoring(self):
-        """Initialize monitoring thread"""
-        self.monitoring_thread = threading.Thread(target=self.monitor_resources, daemon=True)
-        self.monitoring_thread.start()
+        try:
+            command = {
+                'type': command_type,
+                'data': data
+            }
 
-    def monitor_resources(self):
-        """Monitor system resources with improved error handling"""
-        while True:
-            if self.connected and self.cipher_suite:
-                try:
-                    # Get hardware info
-                    response = self.send_command('hardware_monitor', {})
-                    if response and response.get('status') == 'success':
-                        self.after(0, self.update_hardware_info, response['data'])
+            encrypted_data = connection['cipher_suite'].encrypt(json.dumps(command).encode())
+            connection['socket'].send(encrypted_data)
 
-                    # Get system info for computer list
-                    response = self.send_command('system_info', {})
-                    if response and response.get('status') == 'success':
-                        self.after(0, self.update_computer_list, [response['data']])
+            encrypted_response = connection['socket'].recv(4096)
+            response = json.loads(connection['cipher_suite'].decrypt(encrypted_response).decode())
+            return response
 
-                except Exception as e:
-                    print(f"Monitoring error: {str(e)}")
-
-            time.sleep(1)  # Update every second
+        except Exception as e:
+            print(f"Command error for {connection_id}: {str(e)}")
+            return None
 
     def update_hardware_info(self, data):
-        """Update hardware monitoring displays"""
+        """Update hardware monitoring displays with disk I/O"""
         try:
-            # Update CPU usage
-            cpu_percent = data['cpu_percent']
-            self.cpu_progress.configure(mode="determinate")  # Ensure progress bar is in determinate mode
-            self.cpu_progress.set(cpu_percent / 100.0)  # Convert percentage to 0-1 range
+            cpu_percent = data.get('cpu_percent', 0)
+            self.cpu_progress.configure(mode="determinate")
+            self.cpu_progress.set(cpu_percent / 100.0)
+            self.cpu_label.configure(text=f"{cpu_percent:.1f}%")
 
             # Update memory usage
-            memory_data = data['memory_usage']
-            memory_percent = memory_data['percent']
+            memory_data = data.get('memory_usage', {})
+            memory_percent = memory_data.get('percent', 0)
             self.mem_progress.configure(mode="determinate")
             self.mem_progress.set(memory_percent / 100.0)
+            self.mem_label.configure(text=f"{memory_percent:.1f}%")
 
-            # Update disk usage display
+            # Update disk I/O usage
+            disk_io_data = data.get('disk_io', {})
+            disk_io_percent = disk_io_data.get('percent', 0)
+            self.disk_io_progress.configure(mode="determinate")
+            self.disk_io_progress.set(disk_io_percent / 100.0)
+            self.disk_io_label.configure(text=f"{disk_io_percent:.1f}%")
+
+            # Clear existing disk information
             for widget in self.disk_frame.winfo_children():
                 widget.destroy()
 
-            for mount, usage in data['disk_usage'].items():
-                frame = ctk.CTkFrame(self.disk_frame)
-                frame.pack(fill=tk.X, padx=5, pady=2)
+            # Create header
+            header_frame = ctk.CTkFrame(self.disk_frame)
+            header_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
 
-                # Add drive label
-                label = ctk.CTkLabel(frame, text=f"{mount}")
+            headers = ["Drive", "Capacity", "Used Space", "Free Space", "Usage"]
+            widths = [100, 150, 150, 150, 100]  # Approximate widths for each column
+
+            for header, width in zip(headers, widths):
+                label = ctk.CTkLabel(header_frame, text=header, width=width)
                 label.pack(side=tk.LEFT, padx=5)
 
-                # Add progress bar
-                progress = ctk.CTkProgressBar(frame)
-                progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-                progress.configure(mode="determinate")
-                progress.set(usage['percent'] / 100.0)
+            # Update disk usage display with Task Manager style
+            disk_usage = data.get('disk_usage', {})
+            for mount, usage in disk_usage.items():
+                try:
+                    # Create frame for this disk
+                    disk_frame = ctk.CTkFrame(self.disk_frame)
+                    disk_frame.pack(fill=tk.X, padx=5, pady=2)
 
-                # Add percentage label
-                percent_label = ctk.CTkLabel(frame, text=f"{usage['percent']:.1f}%")
-                percent_label.pack(side=tk.RIGHT, padx=5)
+                    # Drive letter/name
+                    ctk.CTkLabel(disk_frame, text=mount, width=100).pack(side=tk.LEFT, padx=5)
 
-            self.update()  # Force GUI update
+                    # Total capacity
+                    total_gb = usage.get('total', 0) / (1024 ** 3)
+                    ctk.CTkLabel(disk_frame,
+                                 text=f"{total_gb:.1f} GB",
+                                 width=150
+                                 ).pack(side=tk.LEFT, padx=5)
+
+                    # Used space
+                    used_gb = usage.get('used', 0) / (1024 ** 3)
+                    ctk.CTkLabel(disk_frame,
+                                 text=f"{used_gb:.1f} GB",
+                                 width=150
+                                 ).pack(side=tk.LEFT, padx=5)
+
+                    # Free space
+                    free_gb = (usage.get('total', 0) - usage.get('used', 0)) / (1024 ** 3)
+                    ctk.CTkLabel(disk_frame,
+                                 text=f"{free_gb:.1f} GB",
+                                 width=150
+                                 ).pack(side=tk.LEFT, padx=5)
+
+                    # Usage percentage and progress bar
+                    percent_frame = ctk.CTkFrame(disk_frame)
+                    percent_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+                    percent = usage.get('percent', 0)
+                    progress = ctk.CTkProgressBar(percent_frame)
+                    progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+                    progress.set(percent / 100.0)
+
+                    # Color the progress bar based on usage
+                    if percent >= 90:
+                        progress.configure(progress_color="red")
+                    elif percent >= 75:
+                        progress.configure(progress_color="orange")
+                    else:
+                        progress.configure(progress_color="green")
+
+                    ctk.CTkLabel(percent_frame,
+                                 text=f"{percent:.1f}%",
+                                 width=50
+                                 ).pack(side=tk.LEFT, padx=5)
+
+                except Exception as disk_error:
+                    print(f"Error displaying disk {mount}: {str(disk_error)}")
+                    continue
 
         except Exception as e:
             print(f"Error updating hardware info: {str(e)}")
 
-    def update_computer_list(self, computers):
-        """Update the computer list panel"""
-        self.computer_list.delete('1.0', tk.END)
-        for computer in computers:
-            self.computer_list.insert(tk.END, f"📱 {computer['hostname']}\n")
-            self.computer_list.insert(tk.END, f"   OS: {computer['os']}\n")
-            self.computer_list.insert(tk.END, f"   CPU Cores: {computer['cpu_count']}\n")
-            self.computer_list.insert(tk.END, "\n")
+    def update_software_status(self, message):
+        """Update status message safely"""
+        try:
+            if hasattr(self, 'status_label') and self.status_label.winfo_exists():
+                self.status_label.configure(text=message)
+                self.software_tab.update_idletasks()
+        except Exception as e:
+            print(f"Error updating status: {e}")
 
-    def update_network_info(self, data):
-        """Update network monitoring displays"""
-        # Update network statistics
-        stats = data['io_counters']
-        self.network_stats.delete('1.0', tk.END)
-        self.network_stats.insert('1.0',
-                                  f"Bytes Sent: {stats['bytes_sent']:,}\n"
-                                  f"Bytes Received: {stats['bytes_recv']:,}\n"
-                                  f"Packets Sent: {stats['packets_sent']:,}\n"
-                                  f"Packets Received: {stats['packets_recv']:,}\n"
-                                  f"Errors In: {stats['errin']}\n"
-                                  f"Errors Out: {stats['errout']}\n"
-                                  )
-
-        # Update connections list
-        self.connections_tree.delete(*self.connections_tree.get_children())
-        for conn in data['connections']:
-            if conn['laddr'] and conn['raddr']:  # Only show active connections
-                self.connections_tree.insert('', 'end', values=(
-                    f"{conn['laddr'][0]}:{conn['laddr'][1]}",
-                    f"{conn['raddr'][0]}:{conn['raddr'][1]}",
-                    conn['status']
-                ))
-
-    def refresh_software_list(self):
-        """Refresh the installed software list"""
-        response = self.send_command('software_inventory', {})
-        if response['status'] == 'success':
-            self.software_tree.delete(*self.software_tree.get_children())
-            for software in response['data']:
-                self.software_tree.insert('', 'end', values=(
-                    software['name'],
-                    software['version']
-                ))
-
-    def install_software(self):
-        """Handle software installation"""
-        file_path = filedialog.askopenfilename(
-            filetypes=[("Executable files", "*.exe"), ("All files", "*.*")]
-        )
-        if file_path:
-            response = self.send_command('software_install', {
-                'file_path': file_path
-            })
-            if response['status'] == 'success':
-                messagebox.showinfo("Installation", "Software installed successfully")
-                self.refresh_software_list()
-            else:
-                messagebox.showerror("Installation Error", response['message'])
-
-    def uninstall_software(self):
-        """Handle software uninstallation"""
-        selected = self.software_tree.selection()
-        if not selected:
-            messagebox.showwarning("Selection", "Please select software to uninstall")
+    def refresh_monitoring(self):
+        """Refresh monitoring data with improved error handling"""
+        if not self.active_connection:
             return
 
-        software = self.software_tree.item(selected[0])['values'][0]
-        if messagebox.askyesno("Confirm Uninstall", f"Uninstall {software}?"):
-            response = self.send_command('software_uninstall', {
-                'software': software
-            })
-            if response['status'] == 'success':
-                messagebox.showinfo("Uninstallation", "Software uninstalled successfully")
-                self.refresh_software_list()
+        try:
+            response = self.send_command(self.active_connection, 'hardware_monitor', {})
+            if response and isinstance(response, dict):
+                if response.get('status') == 'success' and isinstance(response.get('data'), dict):
+                    self.update_hardware_info(response['data'])
+                else:
+                    print("Invalid response format from server")
             else:
-                messagebox.showerror("Uninstallation Error", response['message'])
+                print("No valid response from server")
+        except Exception as e:
+            print(f"Refresh error: {str(e)}")
 
-    def power_action(self, action):
-        """Execute power management action"""
-        if messagebox.askyesno("Confirm Action", f"Execute {action}?"):
-            response = self.send_command('power_management', {
-                'action': action
-            })
-            if response['status'] == 'success':
-                messagebox.showinfo("Power Management", f"{action.title()} initiated")
-            else:
-                messagebox.showerror("Power Management Error", response['message'])
-
-    def schedule_power_action(self):
-        """Schedule a power management action"""
-        time = self.schedule_time.get()
-        action = self.power_action_var.get()
+    def install_software(self):
+        """Safely handle software installation"""
+        if not self.active_connection:
+            self.update_software_status("Please select a computer first")
+            return
 
         try:
-            # Validate time format
-            hour, minute = map(int, time.split(':'))
-            if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                raise ValueError()
+            file_path = filedialog.askopenfilename(
+                title="Select Software to Install",
+                filetypes=[
+                    ("Executable files", "*.exe"),
+                    ("MSI files", "*.msi"),
+                    ("All files", "*.*")
+                ]
+            )
 
-            response = self.send_command('schedule_power', {
-                'action': action,
-                'time': time
-            })
+            if file_path:
+                self.update_software_status("Installing software... Please wait")
 
-            if response['status'] == 'success':
-                messagebox.showinfo("Schedule", f"{action.title()} scheduled for {time}")
-            else:
-                messagebox.showerror("Schedule Error", response['message'])
+                with open(file_path, 'rb') as file:
+                    file_data = file.read()
+                    response = self.send_command(self.active_connection, 'software_install', {
+                        'filename': os.path.basename(file_path),
+                        'data': file_data.hex()
+                    })
 
-        except ValueError:
-            messagebox.showerror("Invalid Time", "Please enter time in HH:MM format")
+                if response and response.get('status') == 'success':
+                    self.update_software_status("Software installed successfully")
+                    self.refresh_software_list()
+                else:
+                    self.update_software_status("Installation failed")
+
+        except Exception as e:
+            self.update_software_status(f"Installation error: {str(e)}")
+
+    def uninstall_software(self):
+        """Safely handle software uninstallation"""
+        if not self.active_connection:
+            self.update_software_status("Please select a computer first")
+            return
+
+        selected = self.software_tree.selection()
+        if not selected:
+            self.update_software_status("Please select software to uninstall")
+            return
+
+        try:
+            software = self.software_tree.item(selected[0])['values'][0]
+            if messagebox.askyesno("Confirm Uninstall", f"Are you sure you want to uninstall {software}?"):
+                self.update_software_status("Uninstalling software...")
+
+                response = self.send_command(self.active_connection, 'software_uninstall', {
+                    'software': software
+                })
+
+                if response and response.get('status') == 'success':
+                    self.update_software_status("Software uninstalled successfully")
+                    self.refresh_software_list()
+                else:
+                    self.update_software_status("Uninstallation failed")
+
+        except Exception as e:
+            self.update_software_status(f"Uninstallation error: {str(e)}")
 
     def select_files(self):
         """Open file selection dialog"""
@@ -480,6 +599,10 @@ class MCCClient(ctk.CTk):
 
     def transfer_files(self):
         """Handle file transfer"""
+        if not self.active_connection:
+            messagebox.showwarning("Connection", "Please select a computer first")
+            return
+
         source_files = self.source_path.get().split(';')
         destination = self.dest_path.get()
 
@@ -489,16 +612,19 @@ class MCCClient(ctk.CTk):
 
         for file_path in source_files:
             try:
-                response = self.send_command('file_transfer', {
-                    'operation': 'send',
-                    'source': file_path,
-                    'destination': destination
-                })
+                with open(file_path, 'rb') as file:
+                    file_data = file.read()
+                    response = self.send_command(self.active_connection, 'file_transfer', {
+                        'operation': 'send',
+                        'filename': os.path.basename(file_path),
+                        'destination': destination,
+                        'data': file_data.decode('utf-8', errors='ignore')
+                    })
 
-                if response['status'] == 'success':
+                if response and response.get('status') == 'success':
                     self.transfer_log.insert('end', f"Transferred: {file_path}\n")
                 else:
-                    self.transfer_log.insert('end', f"Failed: {file_path} - {response['message']}\n")
+                    self.transfer_log.insert('end', f"Failed: {file_path}\n")
 
                 self.transfer_log.see('end')
 
@@ -508,16 +634,20 @@ class MCCClient(ctk.CTk):
 
     def execute_command(self):
         """Execute command on remote system"""
+        if not self.active_connection:
+            messagebox.showwarning("Connection", "Please select a computer first")
+            return
+
         command = self.command_input.get()
         if not command:
             return
 
-        response = self.send_command('execute_command', {
+        response = self.send_command(self.active_connection, 'execute_command', {
             'command': command
         })
 
         self.command_output.delete('1.0', tk.END)
-        if response['status'] == 'success':
+        if response and response.get('status') == 'success':
             output = response['data']
             self.command_output.insert('1.0',
                                        f"Command: {command}\n"
@@ -526,14 +656,65 @@ class MCCClient(ctk.CTk):
                                        f"Return Code: {output['return_code']}\n"
                                        )
         else:
-            self.command_output.insert('1.0', f"Error: {response['message']}\n")
+            self.command_output.insert('1.0', f"Error executing command\n")
 
-    def run_saved_command(self):
-        """Execute saved command"""
-        command = self.saved_commands.get()
-        self.command_input.delete(0, tk.END)
-        self.command_input.insert(0, command)
-        self.execute_command()
+    def power_action(self, action):
+        """Execute power management action"""
+        if not self.active_connection:
+            messagebox.showwarning("Connection", "Please select a computer first")
+            return
+
+        if messagebox.askyesno("Confirm Action", f"Execute {action} on the selected computer?"):
+            response = self.send_command(self.active_connection, 'power_management', {
+                'action': action
+            })
+
+            if response and response.get('status') == 'success':
+                messagebox.showinfo("Power Management", f"{action.title()} initiated")
+            else:
+                messagebox.showerror("Power Management Error", "Failed to execute power action")
+
+    def refresh_software_list(self):
+        """Safely refresh the software list"""
+        if not self.active_connection:
+            self.update_software_status("Please select a computer first")
+            return
+
+        try:
+            self.update_software_status("Retrieving software list...")
+
+            response = self.send_command(self.active_connection, 'software_inventory', {})
+
+            if response and response.get('status') == 'success':
+                # Clear existing items
+                for item in self.software_tree.get_children():
+                    self.software_tree.delete(item)
+
+                # Add new items
+                for software in response['data']:
+                    self.software_tree.insert('', 'end', values=(
+                        software.get('name', 'Unknown'),
+                        software.get('version', 'Unknown')
+                    ))
+
+                self.update_software_status("Software list updated successfully")
+            else:
+                self.update_software_status("Failed to retrieve software list")
+
+        except Exception as e:
+            self.update_software_status(f"Error refreshing list: {str(e)}")
+
+    def initialize_monitoring(self):
+        """Initialize monitoring thread"""
+        self.monitoring_thread = threading.Thread(target=self.monitor_resources, daemon=True)
+        self.monitoring_thread.start()
+
+    def monitor_resources(self):
+        """Monitor system resources"""
+        while True:
+            if self.active_connection:
+                self.refresh_monitoring()
+            time.sleep(1)
 
 
 if __name__ == "__main__":
