@@ -1,0 +1,290 @@
+import socket
+import threading
+import json
+import psutil
+import platform
+import subprocess
+import os
+from datetime import datetime
+import winreg
+import logging
+from cryptography.fernet import Fernet
+
+
+class MCCServer:
+    def __init__(self, host='0.0.0.0', port=5000):
+        self.host = host
+        self.port = port
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.clients = {}
+        self.encryption_key = Fernet.generate_key()
+        self.cipher_suite = Fernet(self.encryption_key)
+
+        # Setup logging
+        logging.basicConfig(
+            filename='mcc_server.log',
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+
+    def start(self):
+        """Start the server and listen for connections"""
+        try:
+            self.server_socket.bind((self.host, self.port))
+            self.server_socket.listen(5)
+            logging.info(f"Server started on {self.host}:{self.port}")
+
+            while True:
+                client_socket, address = self.server_socket.accept()
+                client_handler = threading.Thread(
+                    target=self.handle_client,
+                    args=(client_socket, address)
+                )
+                client_handler.start()
+
+        except Exception as e:
+            logging.error(f"Server error: {str(e)}")
+            raise
+
+    def handle_client(self, client_socket, address):
+        """Handle individual client connections"""
+        try:
+            # Send encryption key immediately after connection
+            client_socket.send(self.encryption_key)
+
+            self.clients[address] = {
+                'socket': client_socket,
+                'last_seen': datetime.now(),
+                'system_info': self.get_system_info()
+            }
+            logging.info(f"New connection from {address}, encryption key sent")
+
+            while True:
+                encrypted_data = client_socket.recv(4096)
+                if not encrypted_data:
+                    break
+
+                data = self.cipher_suite.decrypt(encrypted_data).decode()
+                command = json.loads(data)
+                response = self.process_command(command)
+
+                encrypted_response = self.cipher_suite.encrypt(
+                    json.dumps(response).encode()
+                )
+                client_socket.send(encrypted_response)
+
+        except Exception as e:
+            logging.error(f"Error handling client {address}: {str(e)}")
+        finally:
+            self.clients.pop(address, None)
+            client_socket.close()
+
+    def get_system_info(self):
+        """Gather system information"""
+        return {
+            'hostname': platform.node(),
+            'os': platform.system(),
+            'os_version': platform.version(),
+            'cpu_count': psutil.cpu_count(),
+            'total_memory': psutil.virtual_memory().total,
+            'disk_partitions': [partition.mountpoint for partition in psutil.disk_partitions()]
+        }
+
+    def process_command(self, command):
+        """Process incoming commands from clients"""
+        cmd_type = command.get('type')
+        cmd_data = command.get('data', {})
+
+        command_handlers = {
+            'system_info': self.handle_system_info,
+            'hardware_monitor': self.handle_hardware_monitor,
+            'software_inventory': self.handle_software_inventory,
+            'power_management': self.handle_power_management,
+            'file_transfer': self.handle_file_transfer,
+            'execute_command': self.handle_command_execution,
+            'network_monitor': self.handle_network_monitor
+        }
+
+        handler = command_handlers.get(cmd_type)
+        if handler:
+            return handler(cmd_data)
+        else:
+            return {'status': 'error', 'message': 'Unknown command'}
+
+    def handle_system_info(self, data):
+        """Return system information"""
+        return {
+            'status': 'success',
+            'data': self.get_system_info()
+        }
+
+    def handle_hardware_monitor(self, data):
+        """Monitor hardware metrics with improved drive handling"""
+        disk_usage = {}
+
+        # Safely collect disk usage information
+        for partition in psutil.disk_partitions(all=False):
+            try:
+                # Only check fixed drives and skip removable drives
+                if 'fixed' in partition.opts or partition.fstype == 'NTFS':
+                    usage = psutil.disk_usage(partition.mountpoint)
+                    disk_usage[partition.mountpoint] = dict(usage._asdict())
+            except Exception as e:
+                logging.warning(f"Could not access drive {partition.mountpoint}: {str(e)}")
+                continue
+
+        return {
+            'status': 'success',
+            'data': {
+                'cpu_percent': psutil.cpu_percent(interval=1),
+                'memory_usage': dict(psutil.virtual_memory()._asdict()),
+                'disk_usage': disk_usage,
+                'network_io': dict(psutil.net_io_counters()._asdict())
+            }
+        }
+
+    def handle_software_inventory(self, data):
+        """Get installed software inventory with improved error handling"""
+        software_list = []
+
+        if platform.system() == 'Windows':
+            keys_to_check = [
+                r'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+                r'SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+            ]
+
+            for base_key in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:
+                for key_path in keys_to_check:
+                    try:
+                        registry_key = winreg.OpenKey(base_key, key_path)
+
+                        for i in range(0, winreg.QueryInfoKey(registry_key)[0]):
+                            try:
+                                key_name = winreg.EnumKey(registry_key, i)
+                                software_key = winreg.OpenKey(registry_key, key_path + '\\' + key_name)
+
+                                try:
+                                    name = winreg.QueryValueEx(software_key, 'DisplayName')[0]
+                                    try:
+                                        version = winreg.QueryValueEx(software_key, 'DisplayVersion')[0]
+                                    except:
+                                        version = "N/A"
+
+                                    # Only add if we have a valid name
+                                    if name and name.strip():
+                                        software_list.append({
+                                            'name': name.strip(),
+                                            'version': version
+                                        })
+                                except (WindowsError, KeyError):
+                                    continue
+                                finally:
+                                    winreg.CloseKey(software_key)
+                            except WindowsError:
+                                continue
+                        winreg.CloseKey(registry_key)
+                    except WindowsError:
+                        continue
+        else:
+            # Basic implementation for Linux/Unix systems
+            try:
+                # Using dpkg on Debian-based systems
+                if os.path.exists('/usr/bin/dpkg'):
+                    result = subprocess.run(['dpkg', '-l'], capture_output=True, text=True)
+                    for line in result.stdout.split('\n'):
+                        if line.startswith('ii'):
+                            parts = line.split()
+                            if len(parts) >= 3:
+                                software_list.append({
+                                    'name': parts[1],
+                                    'version': parts[2]
+                                })
+                # Using rpm on RPM-based systems
+                elif os.path.exists('/usr/bin/rpm'):
+                    result = subprocess.run(['rpm', '-qa', '--queryformat', '%{NAME} %{VERSION}\n'],
+                                            capture_output=True, text=True)
+                    for line in result.stdout.split('\n'):
+                        if line.strip():
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                software_list.append({
+                                    'name': parts[0],
+                                    'version': parts[1]
+                                })
+            except Exception as e:
+                logging.error(f"Error getting software inventory: {str(e)}")
+                return {'status': 'error', 'message': str(e)}
+
+        return {
+            'status': 'success',
+            'data': software_list
+        }
+
+    def handle_power_management(self, data):
+        """Handle power management commands"""
+        action = data.get('action')
+        if action == 'shutdown':
+            if platform.system() == 'Windows':
+                os.system('shutdown /s /t 1')
+            else:
+                os.system('shutdown -h now')
+        elif action == 'restart':
+            if platform.system() == 'Windows':
+                os.system('shutdown /r /t 1')
+            else:
+                os.system('shutdown -r now')
+        return {'status': 'success', 'message': f'Power management action {action} initiated'}
+
+    def handle_file_transfer(self, data):
+        """Handle file transfer operations"""
+        operation = data.get('operation')
+        filepath = data.get('filepath')
+
+        if operation == 'receive':
+            try:
+                with open(filepath, 'rb') as file:
+                    return {
+                        'status': 'success',
+                        'data': file.read().decode('utf-8')
+                    }
+            except Exception as e:
+                return {'status': 'error', 'message': str(e)}
+
+        return {'status': 'error', 'message': 'Invalid file operation'}
+
+    def handle_command_execution(self, data):
+        """Execute system commands"""
+        command = data.get('command')
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            return {
+                'status': 'success',
+                'data': {
+                    'stdout': result.stdout,
+                    'stderr': result.stderr,
+                    'return_code': result.returncode
+                }
+            }
+        except Exception as e:
+            return {'status': 'error', 'message': str(e)}
+
+    def handle_network_monitor(self, data):
+        """Monitor network statistics"""
+        return {
+            'status': 'success',
+            'data': {
+                'connections': [conn._asdict() for conn in psutil.net_connections()],
+                'io_counters': dict(psutil.net_io_counters()._asdict())
+            }
+        }
+
+
+if __name__ == "__main__":
+    server = MCCServer()
+    server.start()
