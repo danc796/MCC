@@ -74,8 +74,7 @@ class MCCClient(ctk.CTk):
         self.create_software_tab()
         self.create_power_tab()
         self.create_file_transfer_tab()
-        self.create_command_tab()
-        self.create_network_tab()
+        self.create_remote_desktop_tab()
 
     def create_monitoring_tab(self):
         """Create the monitoring tab with improved widget management"""
@@ -305,31 +304,13 @@ class MCCClient(ctk.CTk):
         # Transfer button
         ctk.CTkButton(file_frame, text="Transfer", command=self.transfer_files).pack(pady=5)
 
-    def create_command_tab(self):
-        """Create the command execution tab"""
-        command_frame = ctk.CTkFrame(self.notebook)
-        self.notebook.add(command_frame, text="Commands")
-
-        # Command input
-        input_frame = ctk.CTkFrame(command_frame)
-        input_frame.pack(fill=tk.X, padx=5, pady=5)
-
-        self.command_input = ctk.CTkEntry(input_frame, placeholder_text="Enter command...")
-        self.command_input.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-
-        ctk.CTkButton(input_frame, text="Execute", command=self.execute_command).pack(side=tk.LEFT)
-
-        # Command output
-        self.command_output = ctk.CTkTextbox(command_frame)
-        self.command_output.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-    def create_network_tab(self):
-        """Create the network monitoring tab"""
-        network_frame = ctk.CTkFrame(self.notebook)
-        self.notebook.add(network_frame, text="Network")
+    def create_remote_desktop_tab(self):  # Renamed from create_network_tab
+        """Create the remote desktop tab"""
+        remote_desktop_frame = ctk.CTkFrame(self.notebook)
+        self.notebook.add(remote_desktop_frame, text="Remote Desktop")  # Changed text from "Network"
 
         # Network statistics
-        stats_frame = ctk.CTkFrame(network_frame)
+        stats_frame = ctk.CTkFrame(remote_desktop_frame)
         stats_frame.pack(fill=tk.X, padx=5, pady=5)
 
         # Add labels for network stats
@@ -340,7 +321,7 @@ class MCCClient(ctk.CTk):
         self.network_recv_label.pack(side=tk.LEFT, padx=10)
 
         # Active connections
-        conn_frame = ctk.CTkFrame(network_frame)
+        conn_frame = ctk.CTkFrame(remote_desktop_frame)
         conn_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         # Add header label
@@ -378,23 +359,10 @@ class MCCClient(ctk.CTk):
 
         # Add refresh button
         ctk.CTkButton(
-            network_frame,
+            remote_desktop_frame,
             text="Refresh",
             command=self.refresh_network_info
         ).pack(pady=5)
-
-        def create_power_button(self, parent, text, action, confirm_msg, hover_color):
-            """Create a power management button with hover effect and confirmation"""
-            button = ctk.CTkButton(
-                parent,
-                text=text,
-                command=lambda: self.power_action_with_confirmation(action, confirm_msg),
-                width=200,
-                height=40,
-                fg_color=("#333333", "#2B2B2B"),  # Dark theme colors
-                hover_color=hover_color
-            )
-            return button
 
     def add_connection(self):
         """Add a new remote connection"""
@@ -877,32 +845,6 @@ class MCCClient(ctk.CTk):
             except Exception as e:
                 self.transfer_log.insert('end', f"Error: {file_path} - {str(e)}\n")
                 self.transfer_log.see('end')
-
-    def execute_command(self):
-        """Execute command on remote system"""
-        if not self.active_connection:
-            messagebox.showwarning("Connection", "Please select a computer first")
-            return
-
-        command = self.command_input.get()
-        if not command:
-            return
-
-        response = self.send_command(self.active_connection, 'execute_command', {
-            'command': command
-        })
-
-        self.command_output.delete('1.0', tk.END)
-        if response and response.get('status') == 'success':
-            output = response['data']
-            self.command_output.insert('1.0',
-                                       f"Command: {command}\n"
-                                       f"Output:\n{output['stdout']}\n"
-                                       f"Errors:\n{output['stderr']}\n"
-                                       f"Return Code: {output['return_code']}\n"
-                                       )
-        else:
-            self.command_output.insert('1.0', f"Error executing command\n")
 
     def power_action(self, action):
         """Execute power management action"""
