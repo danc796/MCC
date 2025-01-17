@@ -13,6 +13,11 @@ class MCCClient(ctk.CTk):
     def __init__(self):
         super().__init__()
 
+        # widget state tracking
+        self.active_tab = None
+        self.monitoring_active = False
+        self.progress_bars = {}
+
         # Initialize connection management
         self.connections = {}  # Dictionary to store all connections
         self.active_connection = None  # Currently selected connection
@@ -122,16 +127,44 @@ class MCCClient(ctk.CTk):
         self.disk_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
     def create_software_tab(self):
-        """Create the software management tab with stable widget handling"""
-        # Main container frame
+        """Create the software management tab"""
         self.software_tab = ctk.CTkFrame(self.notebook)
         self.notebook.add(self.software_tab, text="Software")
 
-        # Top status frame
-        self.status_frame = ctk.CTkFrame(self.software_tab)
-        self.status_frame.pack(fill=tk.X, padx=10, pady=(5, 0))
-        self.status_label = ctk.CTkLabel(self.status_frame, text="Select a computer to view installed software")
-        self.status_label.pack(fill=tk.X, padx=5, pady=5)
+        # Top frame for status and search
+        top_frame = ctk.CTkFrame(self.software_tab)
+        top_frame.pack(fill=tk.X, padx=10, pady=(5, 0))
+
+        # Status label
+        self.status_label = ctk.CTkLabel(
+            top_frame,
+            text="Select a computer to view installed software"
+        )
+        self.status_label.pack(side=tk.LEFT, padx=5, pady=5)
+
+        # Search frame
+        search_frame = ctk.CTkFrame(top_frame)
+        search_frame.pack(side=tk.RIGHT, padx=5, pady=5)
+
+        # Search entry
+        self.search_entry = ctk.CTkEntry(
+            search_frame,
+            placeholder_text="Search software...",
+            width=200
+        )
+        self.search_entry.pack(side=tk.LEFT, padx=(5, 0))
+
+        # Bind search entry to search function
+        self.search_entry.bind('<KeyRelease>', self.on_search)
+
+        # Clear search button
+        self.clear_search_btn = ctk.CTkButton(
+            search_frame,
+            text="Clear",
+            command=self.clear_search,
+            width=60
+        )
+        self.clear_search_btn.pack(side=tk.LEFT, padx=5)
 
         # Software list frame
         self.software_list_frame = ctk.CTkFrame(self.software_tab)
@@ -141,6 +174,7 @@ class MCCClient(ctk.CTk):
         tree_container = ttk.Frame(self.software_list_frame)
         tree_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
+        # Create Treeview
         self.software_tree = ttk.Treeview(
             tree_container,
             columns=("Name", "Version"),
@@ -148,10 +182,13 @@ class MCCClient(ctk.CTk):
         )
 
         # Configure columns
-        self.software_tree.heading("Name", text="Software Name")
-        self.software_tree.heading("Version", text="Version")
-        self.software_tree.column("Name", width=300, minwidth=200)
-        self.software_tree.column("Version", width=100, minwidth=100)
+        self.software_tree.heading("Name", text="Software Name",
+                                   command=lambda: self.treeview_sort_column("Name", False))
+        self.software_tree.heading("Version", text="Version",
+                                   command=lambda: self.treeview_sort_column("Version", False))
+
+        self.software_tree.column("Name", width=400, minwidth=200)
+        self.software_tree.column("Version", width=150, minwidth=100)
 
         # Create and configure scrollbar
         scrollbar = ttk.Scrollbar(tree_container, orient="vertical", command=self.software_tree.yview)
@@ -161,34 +198,14 @@ class MCCClient(ctk.CTk):
         self.software_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Button frame at bottom
-        button_frame = ctk.CTkFrame(self.software_tab)
-        button_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
-
-        # Create buttons using grid for better stability
+        # Refresh button
         self.refresh_btn = ctk.CTkButton(
-            button_frame,
+            self.software_tab,
             text="Refresh List",
             command=self.refresh_software_list,
             width=120
         )
-        self.refresh_btn.pack(side=tk.LEFT, padx=5, pady=5)
-
-        self.install_btn = ctk.CTkButton(
-            button_frame,
-            text="Install Software",
-            command=self.install_software,
-            width=120
-        )
-        self.install_btn.pack(side=tk.LEFT, padx=5, pady=5)
-
-        self.uninstall_btn = ctk.CTkButton(
-            button_frame,
-            text="Uninstall",
-            command=self.uninstall_software,
-            width=120
-        )
-        self.uninstall_btn.pack(side=tk.LEFT, padx=5, pady=5)
+        self.refresh_btn.pack(pady=5)
 
     def create_power_tab(self):
         """Create the power management tab with theme-aware buttons"""
@@ -484,31 +501,49 @@ class MCCClient(ctk.CTk):
             time.sleep(5)  # Check every 5 seconds
 
     def send_command(self, connection_id, command_type, data):
-        """Send command with improved connection handling"""
+        """Send command with improved debugging"""
         connection = self.connections.get(connection_id)
         if not connection:
+            print(f"No connection found for ID: {connection_id}")
             return None
 
         try:
-            # Set a reasonable timeout
-            connection['socket'].settimeout(5)
-
+            # Prepare command
             command = {
                 'type': command_type,
                 'data': data
             }
+            print(f"Sending command: {command_type}")
 
+            # Encrypt and send
             encrypted_data = connection['cipher_suite'].encrypt(json.dumps(command).encode())
             connection['socket'].send(encrypted_data)
+            print("Command sent successfully")
 
-            encrypted_response = connection['socket'].recv(16384)  # Increased buffer size
+            # Receive response
+            print("Waiting for response...")
+            encrypted_response = connection['socket'].recv(16384)
             if not encrypted_response:
-                raise ConnectionError("Empty response from server")
+                print("Received empty response from server")
+                return None
+            print(f"Received encrypted response of length: {len(encrypted_response)}")
 
-            decrypted_response = connection['cipher_suite'].decrypt(encrypted_response).decode()
-            response = json.loads(decrypted_response)
+            # Decrypt response
+            try:
+                decrypted_response = connection['cipher_suite'].decrypt(encrypted_response).decode()
+                print("Response decrypted successfully")
+            except Exception as e:
+                print(f"Decryption error: {str(e)}")
+                return None
 
-            return response
+            # Parse JSON
+            try:
+                response = json.loads(decrypted_response)
+                print(f"Response parsed successfully: {response.get('status', 'unknown status')}")
+                return response
+            except json.JSONDecodeError as e:
+                print(f"JSON parsing error: {str(e)}")
+                return None
 
         except socket.timeout:
             print(f"Connection timeout for {connection_id}")
@@ -516,131 +551,186 @@ class MCCClient(ctk.CTk):
         except ConnectionError as e:
             print(f"Connection error for {connection_id}: {str(e)}")
             return None
-        except json.JSONDecodeError as e:
-            print(f"Invalid JSON response from {connection_id}: {str(e)}")
-            return None
         except Exception as e:
-            print(f"Command error for {connection_id}: {str(e)}")
+            print(f"Unexpected error: {str(e)}")
             return None
-        finally:
-            # Reset timeout
-            try:
-                connection['socket'].settimeout(None)
-            except:
-                pass
 
     def update_hardware_info(self, data):
-        """Update hardware monitoring displays with widget existence checks"""
-        try:
-            # Check if widgets still exist before updating
-            if not hasattr(self, 'cpu_progress') or not self.cpu_progress.winfo_exists():
-                return
-            if not hasattr(self, 'mem_progress') or not self.mem_progress.winfo_exists():
-                return
-            if not hasattr(self, 'disk_frame') or not self.disk_frame.winfo_exists():
-                return
+        """Update hardware monitoring displays with widget validation"""
+        if not self.monitoring_active:
+            return
 
+        try:
             # Update CPU usage with validation
-            cpu_percent = data.get('cpu_percent', 0)
-            if isinstance(cpu_percent, (int, float)) and 0 <= cpu_percent <= 100:
-                self.cpu_progress.set(cpu_percent / 100.0)
-                if hasattr(self, 'cpu_label') and self.cpu_label.winfo_exists():
-                    self.cpu_label.configure(text=f"{cpu_percent:.1f}%")
+            if 'cpu' in self.progress_bars and self.progress_bars['cpu'].winfo_exists():
+                cpu_percent = data.get('cpu_percent', 0)
+                if isinstance(cpu_percent, (int, float)) and 0 <= cpu_percent <= 100:
+                    self.progress_bars['cpu'].set(cpu_percent / 100.0)
+                    if hasattr(self, 'cpu_label') and self.cpu_label.winfo_exists():
+                        self.cpu_label.configure(text=f"{cpu_percent:.1f}%")
 
             # Update memory usage with validation
-            memory_data = data.get('memory_usage', {})
-            if isinstance(memory_data, dict):
-                memory_percent = memory_data.get('percent', 0)
-                if isinstance(memory_percent, (int, float)) and 0 <= memory_percent <= 100:
-                    self.mem_progress.set(memory_percent / 100.0)
-                    if hasattr(self, 'mem_label') and self.mem_label.winfo_exists():
-                        self.mem_label.configure(text=f"{memory_percent:.1f}%")
+            if 'mem' in self.progress_bars and self.progress_bars['mem'].winfo_exists():
+                memory_data = data.get('memory_usage', {})
+                if isinstance(memory_data, dict):
+                    memory_percent = memory_data.get('percent', 0)
+                    if isinstance(memory_percent, (int, float)) and 0 <= memory_percent <= 100:
+                        self.progress_bars['mem'].set(memory_percent / 100.0)
+                        if hasattr(self, 'mem_label') and self.mem_label.winfo_exists():
+                            self.mem_label.configure(text=f"{memory_percent:.1f}%")
 
-            # Safely clear existing disk information
-            try:
+            # Only update disk info if we're on the monitoring tab
+            if self.monitoring_active and hasattr(self, 'disk_frame') and self.disk_frame.winfo_exists():
+                # Clear existing disk information
                 for widget in self.disk_frame.winfo_children():
-                    if widget.winfo_exists():
-                        widget.destroy()
-            except Exception:
-                return
+                    widget.destroy()
 
-            # Update disk usage with validation
-            disk_usage = data.get('disk_usage', {})
-            if isinstance(disk_usage, dict) and self.disk_frame.winfo_exists():
-                try:
-                    # Create header
-                    header_frame = ctk.CTkFrame(self.disk_frame)
-                    header_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
-
-                    headers = ["Drive", "Capacity", "Used Space", "Free Space", "Usage"]
-                    widths = [100, 150, 150, 150, 100]
-
-                    for header, width in zip(headers, widths):
-                        label = ctk.CTkLabel(header_frame, text=header, width=width)
-                        label.pack(side=tk.LEFT, padx=5)
-
-                    for mount, usage in disk_usage.items():
-                        if not isinstance(usage, dict) or not self.disk_frame.winfo_exists():
-                            continue
-
-                        disk_frame = ctk.CTkFrame(self.disk_frame)
-                        disk_frame.pack(fill=tk.X, padx=5, pady=2)
-
-                        total = usage.get('total', 0)
-                        used = usage.get('used', 0)
-                        percent = usage.get('percent', 0)
-
-                        if not all(isinstance(x, (int, float)) for x in [total, used, percent]):
-                            continue
-
-                        # Drive letter/name
-                        ctk.CTkLabel(disk_frame, text=str(mount), width=100).pack(side=tk.LEFT, padx=5)
-
-                        # Total capacity
-                        total_gb = total / (1024 ** 3)
-                        ctk.CTkLabel(disk_frame, text=f"{total_gb:.1f} GB", width=150).pack(side=tk.LEFT, padx=5)
-
-                        # Used space
-                        used_gb = used / (1024 ** 3)
-                        ctk.CTkLabel(disk_frame, text=f"{used_gb:.1f} GB", width=150).pack(side=tk.LEFT, padx=5)
-
-                        # Free space
-                        free_gb = (total - used) / (1024 ** 3)
-                        ctk.CTkLabel(disk_frame, text=f"{free_gb:.1f} GB", width=150).pack(side=tk.LEFT, padx=5)
-
-                        # Usage percentage and progress bar
-                        if self.disk_frame.winfo_exists():
-                            percent_frame = ctk.CTkFrame(disk_frame)
-                            percent_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-
-                            progress = ctk.CTkProgressBar(percent_frame)
-                            progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-                            progress.set(percent / 100.0)
-
-                            # Color based on usage
-                            if percent >= 90:
-                                progress.configure(progress_color="red")
-                            elif percent >= 75:
-                                progress.configure(progress_color="orange")
-                            else:
-                                progress.configure(progress_color="green")
-
-                            ctk.CTkLabel(percent_frame, text=f"{percent:.1f}%", width=50).pack(side=tk.LEFT, padx=5)
-
-                except Exception as disk_error:
-                    print(f"Error displaying disk info: {str(disk_error)}")
+                # Update disk usage
+                self.update_disk_info(data.get('disk_usage', {}))
 
         except Exception as e:
             print(f"Error updating hardware info: {str(e)}")
 
-    def update_software_status(self, message):
-        """Update status message safely"""
+    def update_disk_info(self, disk_usage):
+        """Separate method for updating disk information"""
         try:
-            if hasattr(self, 'status_label') and self.status_label.winfo_exists():
-                self.status_label.configure(text=message)
-                self.software_tab.update_idletasks()
+            if not isinstance(disk_usage, dict) or not self.monitoring_active:
+                return
+
+            # Create header
+            header_frame = ctk.CTkFrame(self.disk_frame)
+            header_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+
+            headers = ["Drive", "Capacity", "Used Space", "Free Space", "Usage"]
+            widths = [100, 150, 150, 150, 100]
+
+            for header, width in zip(headers, widths):
+                ctk.CTkLabel(header_frame, text=header, width=width).pack(side=tk.LEFT, padx=5)
+
+            for mount, usage in disk_usage.items():
+                if not isinstance(usage, dict):
+                    continue
+
+                try:
+                    disk_frame = ctk.CTkFrame(self.disk_frame)
+                    disk_frame.pack(fill=tk.X, padx=5, pady=2)
+
+                    total = usage.get('total', 0)
+                    used = usage.get('used', 0)
+                    percent = usage.get('percent', 0)
+
+                    if not all(isinstance(x, (int, float)) for x in [total, used, percent]):
+                        continue
+
+                    # Drive letter/name
+                    ctk.CTkLabel(disk_frame, text=str(mount), width=100).pack(side=tk.LEFT, padx=5)
+
+                    # Total capacity
+                    total_gb = total / (1024 ** 3)
+                    ctk.CTkLabel(disk_frame, text=f"{total_gb:.1f} GB", width=150).pack(side=tk.LEFT, padx=5)
+
+                    # Used space
+                    used_gb = used / (1024 ** 3)
+                    ctk.CTkLabel(disk_frame, text=f"{used_gb:.1f} GB", width=150).pack(side=tk.LEFT, padx=5)
+
+                    # Free space
+                    free_gb = (total - used) / (1024 ** 3)
+                    ctk.CTkLabel(disk_frame, text=f"{free_gb:.1f} GB", width=150).pack(side=tk.LEFT, padx=5)
+
+                    # Usage percentage
+                    percent_frame = ctk.CTkFrame(disk_frame)
+                    percent_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+                    if self.monitoring_active and self.disk_frame.winfo_exists():
+                        progress = ctk.CTkProgressBar(percent_frame)
+                        progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+                        progress.set(percent / 100.0)
+
+                        # Color based on usage
+                        if percent >= 90:
+                            progress.configure(progress_color="red")
+                        elif percent >= 75:
+                            progress.configure(progress_color="orange")
+                        else:
+                            progress.configure(progress_color="green")
+
+                        ctk.CTkLabel(percent_frame, text=f"{percent:.1f}%", width=50).pack(side=tk.LEFT, padx=5)
+
+                except Exception as disk_error:
+                    print(f"Error displaying disk {mount}: {str(disk_error)}")
+                    continue
+
         except Exception as e:
-            print(f"Error updating status: {e}")
+            print(f"Error updating disk info: {str(e)}")
+
+    def update_software_status(self, message):
+        """Update status message in software tab"""
+        if hasattr(self, 'status_label') and self.status_label.winfo_exists():
+            self.status_label.configure(text=message)
+
+    def on_search(self, event=None):
+        """Handle software search"""
+        if not self.active_connection:
+            self.update_software_status("Please select a computer first")
+            return
+
+        search_term = self.search_entry.get().strip()
+
+        # Clear the tree
+        for item in self.software_tree.get_children():
+            self.software_tree.delete(item)
+
+        try:
+            response = self.send_command(
+                self.active_connection,
+                'software_inventory',
+                {'search': ''}  # Get all software
+            )
+
+            if response and response.get('status') == 'success':
+                software_list = response.get('data', [])
+
+                # Filter software list based on search term
+                filtered_list = []
+                for software in software_list:
+                    if isinstance(software, dict):
+                        name = software.get('name', '').lower()
+                        version = software.get('version', '').lower()
+                        if search_term.lower() in name or search_term.lower() in version:
+                            filtered_list.append(software)
+
+                # Update the tree with filtered results
+                for software in filtered_list:
+                    self.software_tree.insert('', 'end', values=(
+                        software.get('name', 'Unknown'),
+                        software.get('version', 'N/A')
+                    ))
+
+                # Update status
+                status = f"Found {len(filtered_list)} software items"
+                if search_term:
+                    status += f" matching '{search_term}'"
+                self.update_software_status(status)
+
+        except Exception as e:
+            self.update_software_status(f"Error during search: {str(e)}")
+
+    def clear_search(self):
+        """Clear search and refresh list"""
+        self.search_entry.delete(0, tk.END)
+        self.refresh_software_list()  # Refresh with no search term
+
+    def treeview_sort_column(self, col, reverse):
+        """Sort treeview column"""
+        l = [(self.software_tree.set(k, col), k) for k in self.software_tree.get_children('')]
+        l.sort(reverse=reverse)
+
+        # Rearrange items in sorted positions
+        for index, (val, k) in enumerate(l):
+            self.software_tree.move(k, '', index)
+
+        # Reverse sort next time
+        self.software_tree.heading(col, command=lambda: self.treeview_sort_column(col, not reverse))
 
     def refresh_monitoring(self):
         """Refresh monitoring data with improved error handling"""
@@ -881,8 +971,8 @@ class MCCClient(ctk.CTk):
                     )
                 print(f"Power action error: {str(e)}")
 
-    def refresh_software_list(self):
-        """Safely refresh the software list"""
+    def refresh_software_list(self, search_term=""):
+        """Refresh software list"""
         if not self.active_connection:
             self.update_software_status("Please select a computer first")
             return
@@ -890,23 +980,55 @@ class MCCClient(ctk.CTk):
         try:
             self.update_software_status("Retrieving software list...")
 
-            response = self.send_command(self.active_connection, 'software_inventory', {})
+            # Clear existing items
+            for item in self.software_tree.get_children():
+                self.software_tree.delete(item)
 
-            if response and response.get('status') == 'success':
-                # Clear existing items
-                for item in self.software_tree.get_children():
-                    self.software_tree.delete(item)
+            # Set timeout for software inventory
+            connection = self.connections.get(self.active_connection)
+            if not connection:
+                self.update_software_status("Connection not found")
+                return
 
-                # Add new items
-                for software in response['data']:
-                    self.software_tree.insert('', 'end', values=(
-                        software.get('name', 'Unknown'),
-                        software.get('version', 'Unknown')
-                    ))
+            # Set temporary longer timeout
+            original_timeout = connection['socket'].gettimeout()
+            connection['socket'].settimeout(30)
 
-                self.update_software_status("Software list updated successfully")
-            else:
-                self.update_software_status("Failed to retrieve software list")
+            try:
+                response = self.send_command(
+                    self.active_connection,
+                    'software_inventory',
+                    {'search': search_term}
+                )
+
+                if not response:
+                    self.update_software_status("No response from server")
+                    return
+
+                if response.get('status') == 'error':
+                    self.update_software_status(f"Server error: {response.get('message', 'Unknown error')}")
+                    return
+
+                if response.get('status') == 'success':
+                    software_list = response.get('data', [])
+
+                    for software in software_list:
+                        if isinstance(software, dict):
+                            name = software.get('name', 'Unknown')
+                            version = software.get('version', 'N/A')
+
+                            self.software_tree.insert('', 'end', values=(name, version))
+
+                    status = f"Found {len(software_list)} software items"
+                    if search_term:
+                        status += f" matching '{search_term}'"
+                    self.update_software_status(status)
+                else:
+                    self.update_software_status("Invalid response format")
+
+            finally:
+                # Restore original timeout
+                connection['socket'].settimeout(original_timeout)
 
         except Exception as e:
             self.update_software_status(f"Error refreshing list: {str(e)}")
@@ -981,49 +1103,42 @@ class MCCClient(ctk.CTk):
         self.monitoring_thread.start()
 
     def monitor_resources(self):
-        """Monitor system resources with improved widget checks"""
+        """Monitor system resources with tab awareness"""
         while True:
             try:
-                # Check if the main window still exists
-                if not self.winfo_exists():
-                    break
-
-                if self.active_connection and self.active_connection in self.connections:
-                    # Only refresh if the monitoring tab widgets exist
-                    if (hasattr(self, 'cpu_progress') and
-                            hasattr(self, 'mem_progress') and
-                            hasattr(self, 'disk_frame') and
-                            all(widget.winfo_exists() for widget in
-                                [self.cpu_progress, self.mem_progress, self.disk_frame])):
+                if self.active_connection and self.monitoring_active:
+                    if hasattr(self, 'cpu_progress') and hasattr(self, 'mem_progress'):
                         self.refresh_monitoring()
-                    time.sleep(2)
-                else:
-                    time.sleep(1)
+                time.sleep(2)  # Reduced update frequency
             except Exception as e:
                 print(f"Monitor resources error: {str(e)}")
                 time.sleep(2)
 
     def on_tab_change(self, event):
-        """Handle tab changes with improved widget management"""
+        """Handle tab changes with widget state management"""
         try:
             current_tab = self.notebook.select()
-            tab_name = self.notebook.tab(current_tab, "text")
+            prev_tab = self.active_tab
+            self.active_tab = self.notebook.tab(current_tab, "text")
 
-            # Reset status labels when leaving tabs
-            if hasattr(self, 'power_status') and self.power_status.winfo_exists():
-                self.power_status.configure(
-                    text="Select a computer to manage power options",
-                    text_color="white"
-                )
+            print(f"Tab changed from {prev_tab} to {self.active_tab}")
 
-            # Clean up monitoring tab widgets
-            if tab_name != "Monitoring" and hasattr(self, 'disk_frame'):
-                if self.disk_frame.winfo_exists():
-                    for widget in self.disk_frame.winfo_children():
-                        if widget.winfo_exists():
-                            widget.destroy()
+            # Handle monitoring tab exit
+            if prev_tab == "Monitoring":
+                self.monitoring_active = False
+                # Clear progress bars dict
+                self.progress_bars.clear()
 
-            # Force update the new tab
+            # Handle monitoring tab entry
+            if self.active_tab == "Monitoring":
+                self.monitoring_active = True
+                # Store progress bar references
+                if hasattr(self, 'cpu_progress'):
+                    self.progress_bars['cpu'] = self.cpu_progress
+                if hasattr(self, 'mem_progress'):
+                    self.progress_bars['mem'] = self.mem_progress
+
+            # Update the UI based on the new tab
             self.update_idletasks()
 
         except Exception as e:
