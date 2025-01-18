@@ -230,19 +230,57 @@ class MCCServer:
             }
 
     def handle_power_management(self, data):
-        """Handle power management commands"""
+        """Handle power management commands with enhanced functionality"""
         action = data.get('action')
-        if action == 'shutdown':
+        schedule_time = data.get('schedule_time')
+
+        try:
             if platform.system() == 'Windows':
-                os.system('shutdown /s /t 1')
+                if action == 'shutdown':
+                    if schedule_time:
+                        # Convert schedule_time to seconds
+                        seconds = int((datetime.strptime(schedule_time, '%Y-%m-%d %H:%M:%S') -
+                                       datetime.now()).total_seconds())
+                        if seconds > 0:
+                            os.system(f'shutdown /s /t {seconds}')
+                        else:
+                            raise ValueError("Scheduled time must be in the future")
+                    else:
+                        os.system('shutdown /s /t 1')
+
+                elif action == 'restart':
+                    os.system('shutdown /r /t 1')
+
+                elif action == 'lock':
+                    os.system('rundll32.exe user32.dll,LockWorkStation')
+
+                elif action == 'cancel_scheduled':
+                    os.system('shutdown /a')
+
             else:
-                os.system('shutdown -h now')
-        elif action == 'restart':
-            if platform.system() == 'Windows':
-                os.system('shutdown /r /t 1')
-            else:
-                os.system('shutdown -r now')
-        return {'status': 'success', 'message': f'Power management action {action} initiated'}
+                if action == 'shutdown':
+                    if schedule_time:
+                        os.system(f'shutdown -h {schedule_time}')
+                    else:
+                        os.system('shutdown -h now')
+                elif action == 'restart':
+                    os.system('shutdown -r now')
+                elif action == 'lock':
+                    os.system('loginctl lock-session')
+                elif action == 'cancel_scheduled':
+                    os.system('shutdown -c')
+
+            return {
+                'status': 'success',
+                'message': f'Power management action {action} initiated successfully'
+            }
+
+        except Exception as e:
+            logging.error(f"Power management error: {str(e)}")
+            return {
+                'status': 'error',
+                'message': f'Failed to execute power action: {str(e)}'
+            }
 
     def handle_file_transfer(self, data):
         """Handle file transfer operations"""
