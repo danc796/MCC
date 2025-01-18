@@ -1,5 +1,4 @@
 import socket
-import ssl
 import threading
 import json
 import psutil
@@ -13,129 +12,72 @@ from cryptography.fernet import Fernet
 
 
 class MCCServer:
-    def __init__(self, host='0.0.0.0', port=5000, cert_file='server.crt', key_file='server.key'):
+    def __init__(self, host='0.0.0.0', port=5000):
         self.host = host
         self.port = port
-        self.cert_file = cert_file
-        self.key_file = key_file
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.clients = {}
+        self.encryption_key = Fernet.generate_key()
+        self.cipher_suite = Fernet(self.encryption_key)
 
-        # Create SSL context
-        self.ssl_context = self.create_ssl_context()
-
-        # Setup logging with enhanced security logging
+        # Setup logging
         logging.basicConfig(
             filename='mcc_server.log',
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s'
         )
 
-    def create_ssl_context(self):
-        """Create and configure SSL context with modern security settings"""
-        context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-
-        try:
-            context.load_cert_chain(certfile=self.cert_file, keyfile=self.key_file)
-        except (ssl.SSLError, FileNotFoundError) as e:
-            logging.error(f"Failed to load SSL certificates: {str(e)}")
-            raise
-
-        context.minimum_version = ssl.TLSVersion.TLSv1_3
-        context.maximum_version = ssl.TLSVersion.TLSv1_3
-        context.set_ciphers('ECDHE+AESGCM:ECDHE+CHACHA20')
-
-        # Make the server more permissive for development
-        context.verify_mode = ssl.CERT_NONE
-
-        return context
-
     def start(self):
-        """Start the TLS-enabled server and listen for connections"""
+        """Start the server and listen for connections"""
         try:
             self.server_socket.bind((self.host, self.port))
             self.server_socket.listen(2)
-            logging.info(f"Secure server started on {self.host}:{self.port}")
+            logging.info(f"Server started on {self.host}:{self.port}")
 
             while True:
-                try:
-                    client_socket, address = self.server_socket.accept()
-                    logging.info(f"Received connection request from {address}")
-
-                    # Wrap the socket with TLS
-                    secure_socket = self.ssl_context.wrap_socket(
-                        client_socket,
-                        server_side=True,
-                        do_handshake_on_connect=True
-                    )
-                    logging.info(f"TLS handshake completed with {address}")
-
-                    # Generate encryption key
-                    cipher_suite = Fernet(Fernet.generate_key())
-
-                    # Start client handler thread
-                    client_handler = threading.Thread(
-                        target=self.handle_client,
-                        args=(secure_socket, address, cipher_suite),
-                        daemon=True
-                    )
-                    client_handler.start()
-                    logging.info(f"Started handler thread for {address}")
-
-                except ssl.SSLError as e:
-                    logging.error(f"SSL handshake failed with {address}: {str(e)}")
-                    client_socket.close()
-                except Exception as e:
-                    logging.error(f"Error accepting connection from {address}: {str(e)}")
-                    if 'client_socket' in locals():
-                        client_socket.close()
+                client_socket, address = self.server_socket.accept()
+                client_handler = threading.Thread(
+                    target=self.handle_client,
+                    args=(client_socket, address)
+                )
+                client_handler.start()
 
         except Exception as e:
-            logging.error(f"Fatal server error: {str(e)}", exc_info=True)
+            logging.error(f"Server error: {str(e)}")
             raise
-        finally:
-            self.server_socket.close()
 
-    def handle_client(self, secure_socket, address, cipher_suite):
-        """Handle individual client connections with TLS encryption"""
+    def handle_client(self, client_socket, address):
+        """Handle individual client connections"""
         try:
-            # Send the encryption key
-            encryption_key = Fernet.generate_key()
-            secure_socket.sendall(encryption_key)
-
-            # Create new cipher suite with the generated key
-            cipher_suite = Fernet(encryption_key)
+            # Send encryption key immediately after connection
+            client_socket.send(self.encryption_key)
 
             self.clients[address] = {
-                'socket': secure_socket,
-                'cipher_suite': cipher_suite,
+                'socket': client_socket,
                 'last_seen': datetime.now(),
                 'system_info': self.get_system_info()
             }
-
-            logging.info(f"Successfully established encrypted connection with {address}")
+            logging.info(f"New connection from {address}, encryption key sent")
 
             while True:
-                try:
-                    encrypted_data = secure_socket.recv(4096)
-                    if not encrypted_data:
-                        break
-
-                    data = cipher_suite.decrypt(encrypted_data).decode()
-                    command = json.loads(data)
-                    response = self.process_command(command)
-                    encrypted_response = cipher_suite.encrypt(json.dumps(response).encode())
-                    secure_socket.sendall(encrypted_response)
-
-                except Exception as e:
-                    logging.error(f"Communication error with {address}: {str(e)}")
+                encrypted_data = client_socket.recv(4096)
+                if not encrypted_data:
                     break
 
+                data = self.cipher_suite.decrypt(encrypted_data).decode()
+                command = json.loads(data)
+                response = self.process_command(command)
+
+                encrypted_response = self.cipher_suite.encrypt(
+                    json.dumps(response).encode()
+                )
+                client_socket.send(encrypted_response)
+
         except Exception as e:
-            logging.error(f"Connection handler error for {address}: {str(e)}")
+            logging.error(f"Error handling client {address}: {str(e)}")
         finally:
             self.clients.pop(address, None)
-            secure_socket.close()
+            client_socket.close()
 
     def get_system_info(self):
         """Gather system information"""
