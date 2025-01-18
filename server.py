@@ -232,19 +232,16 @@ class MCCServer:
     def handle_power_management(self, data):
         """Handle power management commands with enhanced functionality"""
         action = data.get('action')
-        schedule_time = data.get('schedule_time')
+        seconds = data.get('seconds')
 
         try:
             if platform.system() == 'Windows':
                 if action == 'shutdown':
-                    if schedule_time:
-                        # Convert schedule_time to seconds
-                        seconds = int((datetime.strptime(schedule_time, '%Y-%m-%d %H:%M:%S') -
-                                       datetime.now()).total_seconds())
+                    if seconds is not None:
                         if seconds > 0:
                             os.system(f'shutdown /s /t {seconds}')
                         else:
-                            raise ValueError("Scheduled time must be in the future")
+                            raise ValueError("Invalid shutdown time")
                     else:
                         os.system('shutdown /s /t 1')
 
@@ -258,9 +255,10 @@ class MCCServer:
                     os.system('shutdown /a')
 
             else:
+                # Linux/Unix commands
                 if action == 'shutdown':
-                    if schedule_time:
-                        os.system(f'shutdown -h {schedule_time}')
+                    if seconds is not None:
+                        os.system(f'shutdown -h +{seconds // 60}')  # Convert seconds to minutes for Linux
                     else:
                         os.system('shutdown -h now')
                 elif action == 'restart':
