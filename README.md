@@ -40,9 +40,8 @@ Features:
    - Install software on multiple computers at once to save time and ensure consistency.
    - Schedule installations during off-peak hours for uninterrupted workflows.
 
-9. Remote Desktop: ---1,2,3
+9. Remote Desktop: ---1,2
    - Access and control any computer in the network remotely.
-   - Ensure secure and encrypted connections for safe remote sessions.
    - Take screenshots of any computer’s desktop in real time.
 
 10. System Notifications: ---1
