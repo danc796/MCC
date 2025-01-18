@@ -271,19 +271,11 @@ class MCCClient(ctk.CTk):
         time_frame = ctk.CTkFrame(schedule_frame)
         time_frame.pack(fill=tk.X, pady=5)
 
-        # Date entry with default value (current date)
-        current_date = datetime.now().strftime('%Y-%m-%d')
-        self.schedule_date = ctk.CTkEntry(
-            time_frame,
-            placeholder_text="YYYY-MM-DD"
-        )
-        self.schedule_date.insert(0, current_date)
-        self.schedule_date.pack(side=tk.LEFT, padx=5)
-
-        # Time entry
+        # Time entry (HH:MM format)
         self.schedule_time = ctk.CTkEntry(
             time_frame,
-            placeholder_text="HH:MM:SS"
+            placeholder_text="HH:MM",
+            width=100
         )
         self.schedule_time.pack(side=tk.LEFT, padx=5)
 
@@ -971,56 +963,63 @@ class MCCClient(ctk.CTk):
     def schedule_shutdown(self):
         """Schedule a shutdown for the selected computer(s)"""
         try:
-            date_str = self.schedule_date.get()
             time_str = self.schedule_time.get()
 
-            if not date_str or not time_str:
-                self.update_power_status("Please enter both date and time", "red")
+            if not time_str:
+                self.update_power_status("Please enter time in HH:MM format", "red")
                 return
 
-            schedule_time = f"{date_str} {time_str}"
-            scheduled_datetime = datetime.strptime(schedule_time, '%Y-%m-%d %H:%M:%S')
+            try:
+                # Parse the time
+                hours, minutes = map(int, time_str.split(':'))
+                if not (0 <= hours <= 23 and 0 <= minutes <= 59):
+                    raise ValueError("Invalid time values")
 
-            # Check if scheduled time is in the future
-            if scheduled_datetime <= datetime.now():
-                self.update_power_status("Scheduled time must be in the future", "red")
-                return
+                # Calculate seconds until shutdown
+                current_time = datetime.now()
+                target_time = current_time.replace(hour=hours, minute=minutes, second=0, microsecond=0)
 
-            if self.power_mode.get() == "all":
-                if messagebox.askyesno("Confirm Action", "Schedule shutdown for all computers?"):
-                    failed_computers = []
-                    for conn_id in list(self.connections.keys()):  # Create a copy of keys
-                        try:
-                            response = self.send_command(conn_id, 'power_management', {
-                                'action': 'shutdown',
-                                'schedule_time': schedule_time
-                            })
-                            if not response or response.get('status') != 'success':
+                # If the time has already passed today, schedule for tomorrow
+                if target_time <= current_time:
+                    target_time = target_time.replace(day=current_time.day + 1)
+
+                seconds_until_shutdown = int((target_time - current_time).total_seconds())
+
+                if self.power_mode.get() == "all":
+                    if messagebox.askyesno("Confirm Action", "Schedule shutdown for all computers?"):
+                        failed_computers = []
+                        for conn_id in list(self.connections.keys()):
+                            try:
+                                response = self.send_command(conn_id, 'power_management', {
+                                    'action': 'shutdown',
+                                    'seconds': seconds_until_shutdown
+                                })
+                                if not response or response.get('status') != 'success':
+                                    failed_computers.append(self.connections[conn_id]['host'])
+                            except Exception:
                                 failed_computers.append(self.connections[conn_id]['host'])
-                        except Exception:
-                            failed_computers.append(self.connections[conn_id]['host'])
 
-                    if failed_computers:
-                        self.update_power_status(f"Scheduling failed for: {', '.join(failed_computers)}", "red")
-                    else:
-                        self.update_power_status("Shutdown scheduled for all computers", "green")
-            else:
-                if not self.active_connection:
-                    self.update_power_status("Please select a computer first", "red")
-                    return
-
-                response = self.send_command(self.active_connection, 'power_management', {
-                    'action': 'shutdown',
-                    'schedule_time': schedule_time
-                })
-
-                if response and response.get('status') == 'success':
-                    self.update_power_status("Shutdown scheduled successfully", "green")
+                        if failed_computers:
+                            self.update_power_status(f"Scheduling failed for: {', '.join(failed_computers)}", "red")
+                        else:
+                            self.update_power_status("Shutdown scheduled for all computers", "green")
                 else:
-                    self.update_power_status("Failed to schedule shutdown", "red")
+                    if not self.active_connection:
+                        self.update_power_status("Please select a computer first", "red")
+                        return
 
-        except ValueError:
-            self.update_power_status("Invalid date/time format. Use YYYY-MM-DD HH:MM:SS", "red")
+                    response = self.send_command(self.active_connection, 'power_management', {
+                        'action': 'shutdown',
+                        'seconds': seconds_until_shutdown
+                    })
+
+                    if response and response.get('status') == 'success':
+                        self.update_power_status("Shutdown scheduled successfully", "green")
+                    else:
+                        self.update_power_status("Failed to schedule shutdown", "red")
+
+            except ValueError:
+                self.update_power_status("Invalid time format. Use HH:MM", "red")
         except Exception as e:
             self.update_power_status(f"Error: {str(e)}", "red")
             logging.error(f"Schedule shutdown error: {str(e)}")
