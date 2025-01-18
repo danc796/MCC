@@ -3,7 +3,6 @@ from tkinter import ttk, messagebox, filedialog
 import socket
 import json
 import threading
-import ssl
 from cryptography.fernet import Fernet
 import customtkinter as ctk
 import time
@@ -36,27 +35,11 @@ class MCCClient(ctk.CTk):
         self.create_gui()
         self.initialize_monitoring()
 
-        self.ssl_context = self.create_ssl_context()
-
         logging.basicConfig(
             filename='mcc_client.log',
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s'
         )
-
-    def create_ssl_context(self):
-        """Create and configure SSL context for client"""
-        context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-
-        context.minimum_version = ssl.TLSVersion.TLSv1_3
-        context.maximum_version = ssl.TLSVersion.TLSv1_3
-        context.set_ciphers('ECDHE+AESGCM:ECDHE+CHACHA20')
-
-        # Development settings for self-signed certificates
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-
-        return context
 
     def create_gui(self):
         """Create the main GUI with connection management"""
@@ -436,52 +419,41 @@ class MCCClient(ctk.CTk):
         ).pack(pady=5)
 
     def add_connection(self):
-        """Add a new secure remote connection"""
+        """Add a new remote connection"""
         host = self.host_entry.get()
         port = self.port_entry.get()
 
         if not host:
-            self.show_error("Input Error", "Please enter an IP address")
+            messagebox.showwarning("Input Error", "Please enter an IP address")
             return
 
         try:
             port = int(port) if port else 5000
         except ValueError:
-            self.show_error("Input Error", "Invalid port number")
+            messagebox.showwarning("Input Error", "Invalid port number")
             return
 
         try:
-            # Create base socket with timeout
-            raw_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            raw_socket.settimeout(15)  # Increased timeout for better reliability
-            raw_socket.connect((host, port))
+            # Create new connection
+            new_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            new_socket.settimeout(5)  # 5 second timeout for connection
+            new_socket.connect((host, port))
 
-            # Wrap with TLS
-            secure_socket = self.ssl_context.wrap_socket(
-                raw_socket,
-                server_hostname=host
-            )
+            # Receive encryption key
+            encryption_key = new_socket.recv(1024)
+            cipher_suite = Fernet(encryption_key)
 
-            # Receive the encryption key
-            try:
-                encryption_key = secure_socket.recv(44)  # Fernet keys are 44 bytes
-                if not encryption_key:
-                    raise ConnectionError("No encryption key received")
-                cipher_suite = Fernet(encryption_key)
-            except Exception as e:
-                raise ConnectionError(f"Error receiving encryption key: {str(e)}")
-
-            # Store connection information
+            # Store connection info
             connection_id = f"{host}:{port}"
             self.connections[connection_id] = {
-                'socket': secure_socket,
+                'socket': new_socket,
                 'cipher_suite': cipher_suite,
                 'host': host,
                 'port': port,
                 'system_info': None
             }
 
-            # Start monitoring thread
+            # Start monitoring thread for this connection
             thread = threading.Thread(
                 target=self.monitor_connection,
                 args=(connection_id,),
@@ -489,17 +461,15 @@ class MCCClient(ctk.CTk):
             )
             thread.start()
 
-            # Update UI
+            # Add to computer list
             self.computer_list.insert('', 'end', connection_id, text=host, values=('Connected',))
-            self.clear_connection_inputs()
 
-            logging.info(f"Successfully connected to {host}:{port}")
+            # Clear input fields
+            self.host_entry.delete(0, tk.END)
+            self.port_entry.delete(0, tk.END)
 
-        except socket.timeout:
-            self.show_error("Connection Error", "Connection timed out. Please try again.")
         except Exception as e:
-            self.show_error("Connection Error", f"Failed to connect: {str(e)}")
-            logging.error(f"Connection error: {str(e)}")
+            messagebox.showerror("Connection Error", f"Failed to connect: {str(e)}")
 
     def remove_connection(self):
         """Remove selected connection"""
@@ -553,10 +523,10 @@ class MCCClient(ctk.CTk):
             time.sleep(5)  # Check every 5 seconds
 
     def send_command(self, connection_id, command_type, data):
-        """Send command with TLS and Fernet encryption"""
+        """Send command with improved debugging"""
         connection = self.connections.get(connection_id)
         if not connection:
-            logging.error(f"No connection found for ID: {connection_id}")
+            print(f"No connection found for ID: {connection_id}")
             return None
 
         try:
@@ -565,37 +535,46 @@ class MCCClient(ctk.CTk):
                 'type': command_type,
                 'data': data
             }
+            print(f"Sending command: {command_type}")
 
-            # Encrypt with Fernet
-            encrypted_data = connection['cipher_suite'].encrypt(
-                json.dumps(command).encode()
-            )
-
-            # Send over TLS connection
+            # Encrypt and send
+            encrypted_data = connection['cipher_suite'].encrypt(json.dumps(command).encode())
             connection['socket'].send(encrypted_data)
+            print("Command sent successfully")
 
-            # Receive response over TLS
+            # Receive response
+            print("Waiting for response...")
             encrypted_response = connection['socket'].recv(16384)
-
             if not encrypted_response:
-                logging.error("Received empty response from server")
+                print("Received empty response from server")
+                return None
+            print(f"Received encrypted response of length: {len(encrypted_response)}")
+
+            # Decrypt response
+            try:
+                decrypted_response = connection['cipher_suite'].decrypt(encrypted_response).decode()
+                print("Response decrypted successfully")
+            except Exception as e:
+                print(f"Decryption error: {str(e)}")
                 return None
 
-            # Decrypt response with Fernet
-            decrypted_response = connection['cipher_suite'].decrypt(
-                encrypted_response
-            ).decode()
+            # Parse JSON
+            try:
+                response = json.loads(decrypted_response)
+                print(f"Response parsed successfully: {response.get('status', 'unknown status')}")
+                return response
+            except json.JSONDecodeError as e:
+                print(f"JSON parsing error: {str(e)}")
+                return None
 
-            return json.loads(decrypted_response)
-
-        except ssl.SSLError as e:
-            logging.error(f"SSL error for {connection_id}: {str(e)}")
-            return None
         except socket.timeout:
-            logging.error(f"Connection timeout for {connection_id}")
+            print(f"Connection timeout for {connection_id}")
+            return None
+        except ConnectionError as e:
+            print(f"Connection error for {connection_id}: {str(e)}")
             return None
         except Exception as e:
-            logging.error(f"Error sending command: {str(e)}")
+            print(f"Unexpected error: {str(e)}")
             return None
 
     def update_hardware_info(self, data):
@@ -765,16 +744,6 @@ class MCCClient(ctk.CTk):
 
         except Exception as e:
             self.update_software_status(f"Error during search: {str(e)}")
-
-    def show_error(self, title, message):
-        """Show error message to user"""
-        logging.error(f"{title}: {message}")
-        messagebox.showerror(title, message)
-
-    def clear_connection_inputs(self):
-        """Clear connection input fields"""
-        self.host_entry.delete(0, ctk.END)
-        self.port_entry.delete(0, ctk.END)
 
     def clear_search(self):
         """Clear search and refresh list"""
@@ -1146,8 +1115,8 @@ class MCCClient(ctk.CTk):
                 # Update IO counters
                 io_counters = data.get('io_counters', {})
                 if io_counters:
-                    bytes_sent = self.format_bytes(io_counters.get('bytes_sent', 0))
-                    bytes_recv = self.format_bytes(io_counters.get('bytes_recv', 0))
+                    bytes_sent = format_bytes(io_counters.get('bytes_sent', 0))
+                    bytes_recv = format_bytes(io_counters.get('bytes_recv', 0))
 
                     self.network_sent_label.configure(text=f"Sent: {bytes_sent}")
                     self.network_recv_label.configure(text=f"Received: {bytes_recv}")
@@ -1176,18 +1145,6 @@ class MCCClient(ctk.CTk):
 
         except Exception as e:
             print(f"Error refreshing network info: {str(e)}")
-
-    def format_bytes(self, bytes_value):
-        """Format bytes into human readable format with error handling"""
-        try:
-            bytes_num = float(bytes_value)
-            for unit in ['B', 'KB', 'MB', 'GB']:
-                if bytes_num < 1024.0:
-                    return f"{bytes_num:.1f} {unit}"
-                bytes_num /= 1024.0
-            return f"{bytes_num:.1f} TB"
-        except (TypeError, ValueError):
-            return "0 B"
 
     def initialize_monitoring(self):
         """Initialize monitoring thread"""
@@ -1254,12 +1211,26 @@ class MCCClient(ctk.CTk):
             pass
         return False
 
-    def check_widget_exists(self, widget):
-        """Safely check if a widget exists and is valid"""
-        try:
-            return widget.winfo_exists()
-        except Exception:
-            return False
+
+def check_widget_exists(widget):
+    """Safely check if a widget exists and is valid"""
+    try:
+        return widget.winfo_exists()
+    except Exception:
+        return False
+
+
+def format_bytes(bytes_value):
+    """Format bytes into human readable format with error handling"""
+    try:
+        bytes_num = float(bytes_value)
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if bytes_num < 1024.0:
+                return f"{bytes_num:.1f} {unit}"
+            bytes_num /= 1024.0
+        return f"{bytes_num:.1f} TB"
+    except (TypeError, ValueError):
+        return "0 B"
 
 
 if __name__ == "__main__":
