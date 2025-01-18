@@ -7,6 +7,14 @@ from cryptography.fernet import Fernet
 import customtkinter as ctk
 import time
 import os
+import logging
+from datetime import datetime
+
+logging.basicConfig(
+    filename='mcc_client.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 
 class MCCClient(ctk.CTk):
@@ -207,7 +215,7 @@ class MCCClient(ctk.CTk):
         self.refresh_btn.pack(pady=5)
 
     def create_power_tab(self):
-        """Create the power management tab with theme-aware buttons"""
+        """Create enhanced power management tab"""
         power_frame = ctk.CTkFrame(self.notebook)
         self.notebook.add(power_frame, text="Power")
 
@@ -221,59 +229,105 @@ class MCCClient(ctk.CTk):
             font=("Helvetica", 20)
         ).pack()
 
-        # Status indicator
         self.power_status = ctk.CTkLabel(
             title_frame,
-            text="Select a computer to manage power options",
+            text="Select computer(s) to manage power options",
             font=("Helvetica", 12)
         )
         self.power_status.pack(pady=10)
 
-        # Button container
-        button_frame = ctk.CTkFrame(power_frame)
-        button_frame.pack(expand=True)
+        # Action modes
+        mode_frame = ctk.CTkFrame(power_frame)
+        mode_frame.pack(pady=10)
 
-        # Create shutdown button
-        shutdown_btn = ctk.CTkButton(
-            button_frame,
-            text="Shutdown",
+        self.power_mode = tk.StringVar(value="single")
+
+        single_radio = ctk.CTkRadioButton(
+            mode_frame,
+            text="Single Computer",
+            variable=self.power_mode,
+            value="single"
+        )
+        single_radio.pack(side=tk.LEFT, padx=10)
+
+        all_radio = ctk.CTkRadioButton(
+            mode_frame,
+            text="All Computers",
+            variable=self.power_mode,
+            value="all"
+        )
+        all_radio.pack(side=tk.LEFT, padx=10)
+
+        # Scheduled shutdown frame
+        schedule_frame = ctk.CTkFrame(power_frame)
+        schedule_frame.pack(pady=10, padx=20, fill=tk.X)
+
+        ctk.CTkLabel(
+            schedule_frame,
+            text="Schedule Shutdown",
+            font=("Helvetica", 14)
+        ).pack(pady=5)
+
+        time_frame = ctk.CTkFrame(schedule_frame)
+        time_frame.pack(fill=tk.X, pady=5)
+
+        # Date entry with default value (current date)
+        current_date = datetime.now().strftime('%Y-%m-%d')
+        self.schedule_date = ctk.CTkEntry(
+            time_frame,
+            placeholder_text="YYYY-MM-DD"
+        )
+        self.schedule_date.insert(0, current_date)
+        self.schedule_date.pack(side=tk.LEFT, padx=5)
+
+        # Time entry
+        self.schedule_time = ctk.CTkEntry(
+            time_frame,
+            placeholder_text="HH:MM:SS"
+        )
+        self.schedule_time.pack(side=tk.LEFT, padx=5)
+
+        schedule_btn = ctk.CTkButton(
+            schedule_frame,
+            text="Schedule Shutdown",
+            command=self.schedule_shutdown,
+            width=200,
+            height=40
+        )
+        schedule_btn.pack(pady=5)
+
+        cancel_schedule_btn = ctk.CTkButton(
+            schedule_frame,
+            text="Cancel Scheduled Shutdown",
             command=lambda: self.power_action_with_confirmation(
-                "shutdown",
-                "This will shut down the remote computer. Continue?"
+                "cancel_scheduled",
+                "Cancel all scheduled shutdowns?"
             ),
             width=200,
-            height=40,
-            hover_color="#FF6B6B"  # Red hover
+            height=40
         )
-        shutdown_btn.pack(pady=10)
+        cancel_schedule_btn.pack(pady=5)
 
-        # Create restart button
-        restart_btn = ctk.CTkButton(
-            button_frame,
-            text="Restart",
-            command=lambda: self.power_action_with_confirmation(
-                "restart",
-                "This will restart the remote computer. Continue?"
-            ),
-            width=200,
-            height=40,
-            hover_color="#4D96FF"  # Blue hover
-        )
-        restart_btn.pack(pady=10)
+        # Immediate actions frame
+        actions_frame = ctk.CTkFrame(power_frame)
+        actions_frame.pack(pady=10)
 
-        # Create sleep button
-        sleep_btn = ctk.CTkButton(
-            button_frame,
-            text="Sleep",
-            command=lambda: self.power_action_with_confirmation(
-                "sleep",
-                "This will put the remote computer to sleep. Continue?"
-            ),
-            width=200,
-            height=40,
-            hover_color="#6BCB77"  # Green hover
-        )
-        sleep_btn.pack(pady=10)
+        # Create immediate action buttons
+        buttons_data = [
+            ("Shutdown", "shutdown", "This will shut down the selected computer(s). Continue?", "#FF6B6B"),
+            ("Restart", "restart", "This will restart the selected computer(s). Continue?", "#4D96FF"),
+            ("Lock Screen", "lock", "This will lock the selected computer(s). Continue?", "#FFB562")
+        ]
+
+        for text, action, confirm_msg, hover_color in buttons_data:
+            ctk.CTkButton(
+                actions_frame,
+                text=text,
+                command=lambda a=action, m=confirm_msg: self.power_action_with_confirmation(a, m),
+                width=200,
+                height=40,
+                hover_color=hover_color
+            ).pack(pady=5)
 
     def create_file_transfer_tab(self):
         """Create the file transfer tab"""
@@ -636,6 +690,14 @@ class MCCClient(ctk.CTk):
         if hasattr(self, 'status_label') and self.status_label.winfo_exists():
             self.status_label.configure(text=message)
 
+    def update_power_status(self, message, color="white"):
+        """Update power status label with proper error handling"""
+        try:
+            if hasattr(self, 'power_status') and self.power_status.winfo_exists():
+                self.power_status.configure(text=message, text_color=color)
+        except Exception as e:
+            logging.error(f"Error updating power status: {str(e)}")
+
     def on_search(self, event=None):
         """Handle software search"""
         if not self.active_connection:
@@ -863,55 +925,105 @@ class MCCClient(ctk.CTk):
                 messagebox.showerror("Power Management Error", "Failed to execute power action")
 
     def power_action_with_confirmation(self, action, confirm_msg):
-        """Execute power action with confirmation and proper error handling"""
-        if not self.active_connection:
-            if hasattr(self, 'power_status') and self.power_status.winfo_exists():
-                self.power_status.configure(
-                    text="Please select a computer first",
-                    text_color="red"
-                )
-            return
+        """Execute power action with confirmation for single or multiple computers"""
+        try:
+            if self.power_mode.get() == "all":
+                if not self.connections:
+                    self.update_power_status("No computers connected", "red")
+                    return
 
-        if not self.connections.get(self.active_connection):
-            if hasattr(self, 'power_status') and self.power_status.winfo_exists():
-                self.power_status.configure(
-                    text="Connection lost. Please reconnect.",
-                    text_color="red"
-                )
-            return
+                if messagebox.askyesno("Confirm Action", f"{confirm_msg} (All Computers)"):
+                    failed_computers = []
+                    for conn_id in list(self.connections.keys()):  # Create a copy of keys
+                        try:
+                            response = self.send_command(conn_id, 'power_management', {
+                                'action': action
+                            })
+                            if not response or response.get('status') != 'success':
+                                failed_computers.append(self.connections[conn_id]['host'])
+                        except Exception as e:
+                            failed_computers.append(self.connections[conn_id]['host'])
 
-        # Show confirmation dialog
-        if messagebox.askyesno("Confirm Action", confirm_msg):
-            try:
-                if hasattr(self, 'power_status') and self.power_status.winfo_exists():
-                    self.power_status.configure(
-                        text=f"Initiating {action}...",
-                        text_color="white"
-                    )
+                    if failed_computers:
+                        self.update_power_status(f"Action failed for: {', '.join(failed_computers)}", "red")
+                    else:
+                        self.update_power_status(f"{action.capitalize()} initiated for all computers", "green")
+            else:
+                # Single computer mode
+                if not self.active_connection:
+                    self.update_power_status("Please select a computer first", "red")
+                    return
+
+                if messagebox.askyesno("Confirm Action", confirm_msg):
+                    response = self.send_command(self.active_connection, 'power_management', {
+                        'action': action
+                    })
+
+                    if response and response.get('status') == 'success':
+                        self.update_power_status(f"{action.capitalize()} command sent successfully", "green")
+                    else:
+                        self.update_power_status(f"Failed to execute {action}", "red")
+
+        except Exception as e:
+            self.update_power_status(f"Error: {str(e)}", "red")
+            logging.error(f"Power action error: {str(e)}")
+
+    def schedule_shutdown(self):
+        """Schedule a shutdown for the selected computer(s)"""
+        try:
+            date_str = self.schedule_date.get()
+            time_str = self.schedule_time.get()
+
+            if not date_str or not time_str:
+                self.update_power_status("Please enter both date and time", "red")
+                return
+
+            schedule_time = f"{date_str} {time_str}"
+            scheduled_datetime = datetime.strptime(schedule_time, '%Y-%m-%d %H:%M:%S')
+
+            # Check if scheduled time is in the future
+            if scheduled_datetime <= datetime.now():
+                self.update_power_status("Scheduled time must be in the future", "red")
+                return
+
+            if self.power_mode.get() == "all":
+                if messagebox.askyesno("Confirm Action", "Schedule shutdown for all computers?"):
+                    failed_computers = []
+                    for conn_id in list(self.connections.keys()):  # Create a copy of keys
+                        try:
+                            response = self.send_command(conn_id, 'power_management', {
+                                'action': 'shutdown',
+                                'schedule_time': schedule_time
+                            })
+                            if not response or response.get('status') != 'success':
+                                failed_computers.append(self.connections[conn_id]['host'])
+                        except Exception:
+                            failed_computers.append(self.connections[conn_id]['host'])
+
+                    if failed_computers:
+                        self.update_power_status(f"Scheduling failed for: {', '.join(failed_computers)}", "red")
+                    else:
+                        self.update_power_status("Shutdown scheduled for all computers", "green")
+            else:
+                if not self.active_connection:
+                    self.update_power_status("Please select a computer first", "red")
+                    return
 
                 response = self.send_command(self.active_connection, 'power_management', {
-                    'action': action
+                    'action': 'shutdown',
+                    'schedule_time': schedule_time
                 })
 
-                if hasattr(self, 'power_status') and self.power_status.winfo_exists():
-                    if response and response.get('status') == 'success':
-                        self.power_status.configure(
-                            text=f"{action.capitalize()} command sent successfully",
-                            text_color="green"
-                        )
-                    else:
-                        self.power_status.configure(
-                            text=f"Failed to execute {action}",
-                            text_color="red"
-                        )
+                if response and response.get('status') == 'success':
+                    self.update_power_status("Shutdown scheduled successfully", "green")
+                else:
+                    self.update_power_status("Failed to schedule shutdown", "red")
 
-            except Exception as e:
-                if hasattr(self, 'power_status') and self.power_status.winfo_exists():
-                    self.power_status.configure(
-                        text=f"Error: {str(e)}",
-                        text_color="red"
-                    )
-                print(f"Power action error: {str(e)}")
+        except ValueError:
+            self.update_power_status("Invalid date/time format. Use YYYY-MM-DD HH:MM:SS", "red")
+        except Exception as e:
+            self.update_power_status(f"Error: {str(e)}", "red")
+            logging.error(f"Schedule shutdown error: {str(e)}")
 
     def refresh_software_list(self, search_term=""):
         """Refresh software list"""
