@@ -9,13 +9,17 @@ import time
 import os
 import logging
 from datetime import datetime
+import base64
 
 
 class MCCClient(ctk.CTk):
     def __init__(self):
+        """Initialize the client with proper flag initialization"""
+        # Initialize as CTk
         super().__init__()
 
-        # widget state tracking
+        # Set up flags and state FIRST
+        self.running = True  # Flag for monitoring threads
         self.active_tab = None
         self.monitoring_active = False
         self.progress_bars = {}
@@ -32,14 +36,21 @@ class MCCClient(ctk.CTk):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
-        self.create_gui()
-        self.initialize_monitoring()
-
+        # Set up logging
         logging.basicConfig(
             filename='mcc_client.log',
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s'
         )
+
+        # Create GUI elements
+        self.create_gui()
+
+        # Set up shutdown handler
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+        # Initialize monitoring LAST
+        self.initialize_monitoring()
 
     def create_gui(self):
         """Create the main GUI with connection management"""
@@ -330,33 +341,79 @@ class MCCClient(ctk.CTk):
             ).pack(pady=5)
 
     def create_file_transfer_tab(self):
-        """Create the file transfer tab"""
+        """Create enhanced file transfer tab with drag-and-drop support"""
         file_frame = ctk.CTkFrame(self.notebook)
         self.notebook.add(file_frame, text="File Transfer")
 
-        # Source selection
-        source_frame = ctk.CTkFrame(file_frame)
-        source_frame.pack(fill=tk.X, padx=5, pady=5)
+        # Split frame into upload and download sections
+        left_frame = ctk.CTkFrame(file_frame)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        ctk.CTkButton(source_frame, text="Select Files", command=self.select_files).pack(side=tk.LEFT, padx=5)
-        self.source_path = ctk.CTkEntry(source_frame)
-        self.source_path.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        right_frame = ctk.CTkFrame(file_frame)
+        right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Destination selection
-        dest_frame = ctk.CTkFrame(file_frame)
-        dest_frame.pack(fill=tk.X, padx=5, pady=5)
+        # Upload Section
+        ctk.CTkLabel(left_frame, text="Upload Files", font=("Helvetica", 14, "bold")).pack(pady=5)
 
-        ctk.CTkButton(dest_frame, text="Select Destination", command=self.select_destination).pack(side=tk.LEFT, padx=5)
-        self.dest_path = ctk.CTkEntry(dest_frame)
-        self.dest_path.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        # Drag and drop area
+        self.drop_area = ctk.CTkFrame(left_frame, width=300, height=200)
+        self.drop_area.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
-        # Transfer progress
-        self.transfer_progress = ctk.CTkProgressBar(file_frame)
-        self.transfer_progress.pack(fill=tk.X, padx=5, pady=5)
-        self.transfer_progress.set(0)
+        drop_label = ctk.CTkLabel(self.drop_area, text="Drag and drop files here\nor")
+        drop_label.pack(pady=(40, 5))
 
-        # Transfer button
-        ctk.CTkButton(file_frame, text="Transfer", command=self.transfer_files).pack(pady=5)
+        browse_btn = ctk.CTkButton(self.drop_area, text="Browse Files", command=self.browse_files)
+        browse_btn.pack(pady=5)
+
+        # Selected files list
+        self.selected_files_frame = ctk.CTkFrame(left_frame)
+        self.selected_files_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        ctk.CTkLabel(self.selected_files_frame, text="Selected Files:").pack(anchor=tk.W)
+
+        self.selected_files_list = tk.Listbox(self.selected_files_frame, height=6)
+        self.selected_files_list.pack(fill=tk.BOTH, expand=True)
+
+        # Upload button
+        self.upload_btn = ctk.CTkButton(left_frame, text="Upload to Team Document", command=self.upload_files)
+        self.upload_btn.pack(pady=10)
+
+        # Download Section
+        ctk.CTkLabel(right_frame, text="Team Document Files", font=("Helvetica", 14, "bold")).pack(pady=5)
+
+        # Refresh and filter frame
+        filter_frame = ctk.CTkFrame(right_frame)
+        filter_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        self.file_filter = ctk.CTkEntry(filter_frame, placeholder_text="Filter files...")
+        self.file_filter.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.file_filter.bind('<KeyRelease>', self.filter_files)
+
+        refresh_btn = ctk.CTkButton(filter_frame, text="↺", width=30, command=self.refresh_file_list)
+        refresh_btn.pack(side=tk.RIGHT, padx=5)
+
+        # File list
+        self.server_files_tree = ttk.Treeview(right_frame, columns=("size", "type", "modified"), show="headings")
+        self.server_files_tree.heading("size", text="Size")
+        self.server_files_tree.heading("type", text="Type")
+        self.server_files_tree.heading("modified", text="Modified")
+
+        self.server_files_tree.column("size", width=100)
+        self.server_files_tree.column("type", width=60)
+        self.server_files_tree.column("modified", width=140)
+
+        self.server_files_tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Download button
+        self.download_btn = ctk.CTkButton(right_frame, text="Download Selected", command=self.download_files)
+        self.download_btn.pack(pady=10)
+
+        # Status label
+        self.transfer_status = ctk.CTkLabel(file_frame, text="")
+        self.transfer_status.pack(side=tk.BOTTOM, pady=5)
+
+        # Set up drag and drop
+        self.setup_drag_drop()
 
     def create_remote_desktop_tab(self):  # Renamed from create_network_tab
         """Create the remote desktop tab"""
@@ -523,7 +580,7 @@ class MCCClient(ctk.CTk):
             time.sleep(5)  # Check every 5 seconds
 
     def send_command(self, connection_id, command_type, data):
-        """Send command with improved debugging"""
+        """Send command with improved large data handling"""
         connection = self.connections.get(connection_id)
         if not connection:
             print(f"No connection found for ID: {connection_id}")
@@ -537,8 +594,17 @@ class MCCClient(ctk.CTk):
             }
             print(f"Sending command: {command_type}")
 
-            # Encrypt and send
-            encrypted_data = connection['cipher_suite'].encrypt(json.dumps(command).encode())
+            # Convert to JSON and check size
+            json_data = json.dumps(command)
+
+            # If data is too large, split it into chunks
+            if len(json_data.encode()) > 4000:  # Less than our recv buffer size
+                # For file transfer, use chunked transfer
+                if command_type == 'file_transfer' and data.get('operation') == 'upload':
+                    return self.send_large_file(connection, data)
+
+            # Regular command sending
+            encrypted_data = connection['cipher_suite'].encrypt(json_data.encode())
             connection['socket'].send(encrypted_data)
             print("Command sent successfully")
 
@@ -554,28 +620,92 @@ class MCCClient(ctk.CTk):
             try:
                 decrypted_response = connection['cipher_suite'].decrypt(encrypted_response).decode()
                 print("Response decrypted successfully")
+                return json.loads(decrypted_response)
             except Exception as e:
                 print(f"Decryption error: {str(e)}")
                 return None
 
-            # Parse JSON
-            try:
-                response = json.loads(decrypted_response)
-                print(f"Response parsed successfully: {response.get('status', 'unknown status')}")
-                return response
-            except json.JSONDecodeError as e:
-                print(f"JSON parsing error: {str(e)}")
-                return None
-
-        except socket.timeout:
-            print(f"Connection timeout for {connection_id}")
-            return None
-        except ConnectionError as e:
-            print(f"Connection error for {connection_id}: {str(e)}")
-            return None
         except Exception as e:
-            print(f"Unexpected error: {str(e)}")
+            print(f"Send command error: {str(e)}")
             return None
+
+    def send_large_file(self, connection, data):
+        """Handle large file uploads using chunked transfer"""
+        try:
+            # Send initial command to start file transfer
+            start_command = {
+                'type': 'file_transfer',
+                'data': {
+                    'operation': 'start_upload',
+                    'filename': data['filename'],
+                    'encoding': 'base64'
+                }
+            }
+
+            encrypted_start = connection['cipher_suite'].encrypt(json.dumps(start_command).encode())
+            connection['socket'].send(encrypted_start)
+
+            # Get confirmation
+            response = connection['socket'].recv(4096)
+            if not response:
+                return {'status': 'error', 'message': 'No response from server'}
+
+            response_data = json.loads(connection['cipher_suite'].decrypt(response).decode())
+            if response_data.get('status') != 'success':
+                return response_data
+
+            # Send file data in chunks
+            chunk_size = 3000  # Smaller than our encryption limit
+            content = data['content']
+            total_chunks = len(content) // chunk_size + (1 if len(content) % chunk_size else 0)
+
+            for i in range(0, len(content), chunk_size):
+                chunk = content[i:i + chunk_size]
+                chunk_command = {
+                    'type': 'file_transfer',
+                    'data': {
+                        'operation': 'upload_chunk',
+                        'filename': data['filename'],
+                        'chunk': chunk,
+                        'chunk_number': i // chunk_size + 1,
+                        'total_chunks': total_chunks
+                    }
+                }
+
+                encrypted_chunk = connection['cipher_suite'].encrypt(json.dumps(chunk_command).encode())
+                connection['socket'].send(encrypted_chunk)
+
+                # Wait for chunk confirmation
+                chunk_response = connection['socket'].recv(4096)
+                if not chunk_response:
+                    return {'status': 'error', 'message': f'Lost connection during chunk {i // chunk_size + 1}'}
+
+                response_data = json.loads(connection['cipher_suite'].decrypt(chunk_response).decode())
+                if response_data.get('status') != 'success':
+                    return response_data
+
+            # Send completion command
+            end_command = {
+                'type': 'file_transfer',
+                'data': {
+                    'operation': 'end_upload',
+                    'filename': data['filename']
+                }
+            }
+
+            encrypted_end = connection['cipher_suite'].encrypt(json.dumps(end_command).encode())
+            connection['socket'].send(encrypted_end)
+
+            # Get final confirmation
+            final_response = connection['socket'].recv(4096)
+            if not final_response:
+                return {'status': 'error', 'message': 'No final confirmation from server'}
+
+            return json.loads(connection['cipher_suite'].decrypt(final_response).decode())
+
+        except Exception as e:
+            print(f"Large file transfer error: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
 
     def update_hardware_info(self, data):
         """Update hardware monitoring displays with widget validation"""
@@ -795,134 +925,206 @@ class MCCClient(ctk.CTk):
         except Exception as e:
             print(f"Refresh monitoring error: {str(e)}")
 
-    def install_software(self):
-        """Safely handle software installation"""
+    def setup_drag_drop(self):
+        """Configure drag and drop functionality using native Tkinter"""
+        # Visual feedback for drag and drop
+        self.drop_area.bind('<Enter>', self.drop_area.configure(fg_color="gray40"))
+        self.drop_area.bind('<Leave>', self.drop_area.configure(fg_color="gray25"))
+
+        # Enable dropping files through the file dialog
+        self.drop_area.bind('<Button-1>', self.browse_files)
+
+    def browse_files(self, event=None):
+        """Open file browser dialog"""
+        files = filedialog.askopenfilenames(
+            title="Select Files",
+            filetypes=[
+                ("All Files", "*.*"),
+                ("Text Files", "*.txt"),
+                ("Python Files", "*.py"),
+                ("PDF Files", "*.pdf"),
+                ("Image Files", "*.png *.jpg *.jpeg *.gif")
+            ]
+        )
+
+        # Add selected files to the list
+        for file in files:
+            if file and os.path.exists(file):
+                self.selected_files_list.insert(tk.END, file)
+
+    def upload_files(self):
+        """Upload selected files to server with improved encryption handling"""
         if not self.active_connection:
-            self.update_software_status("Please select a computer first")
+            self.update_transfer_status("Please select a computer first", "red")
             return
 
-        try:
-            file_path = filedialog.askopenfilename(
-                title="Select Software to Install",
-                filetypes=[
-                    ("Executable files", "*.exe"),
-                    ("MSI files", "*.msi"),
-                    ("All files", "*.*")
-                ]
-            )
-
-            if file_path:
-                self.update_software_status("Installing software... Please wait")
-
-                with open(file_path, 'rb') as file:
-                    file_data = file.read()
-                    response = self.send_command(self.active_connection, 'software_install', {
-                        'filename': os.path.basename(file_path),
-                        'data': file_data.hex()
-                    })
-
-                if response and response.get('status') == 'success':
-                    self.update_software_status("Software installed successfully")
-                    self.refresh_software_list()
-                else:
-                    self.update_software_status("Installation failed")
-
-        except Exception as e:
-            self.update_software_status(f"Installation error: {str(e)}")
-
-    def uninstall_software(self):
-        """Safely handle software uninstallation"""
-        if not self.active_connection:
-            self.update_software_status("Please select a computer first")
+        files = self.selected_files_list.get(0, tk.END)
+        if not files:
+            self.update_transfer_status("Please select files to upload", "red")
             return
 
-        selected = self.software_tree.selection()
-        if not selected:
-            self.update_software_status("Please select software to uninstall")
-            return
-
-        try:
-            software = self.software_tree.item(selected[0])['values'][0]
-            if messagebox.askyesno("Confirm Uninstall", f"Are you sure you want to uninstall {software}?"):
-                self.update_software_status("Uninstalling software...")
-
-                response = self.send_command(self.active_connection, 'software_uninstall', {
-                    'software': software
-                })
-
-                if response and response.get('status') == 'success':
-                    self.update_software_status("Software uninstalled successfully")
-                    self.refresh_software_list()
-                else:
-                    self.update_software_status("Uninstallation failed")
-
-        except Exception as e:
-            self.update_software_status(f"Uninstallation error: {str(e)}")
-
-    def select_files(self):
-        """Open file selection dialog"""
-        files = filedialog.askopenfilenames()
-        if files:
-            self.source_path.delete(0, tk.END)
-            self.source_path.insert(0, ';'.join(files))
-
-    def select_destination(self):
-        """Open destination selection dialog"""
-        folder = filedialog.askdirectory()
-        if folder:
-            self.dest_path.delete(0, tk.END)
-            self.dest_path.insert(0, folder)
-
-    def transfer_files(self):
-        """Handle file transfer"""
-        if not self.active_connection:
-            messagebox.showwarning("Connection", "Please select a computer first")
-            return
-
-        source_files = self.source_path.get().split(';')
-        destination = self.dest_path.get()
-
-        if not source_files or not destination:
-            messagebox.showwarning("Transfer", "Please select source and destination")
-            return
-
-        for file_path in source_files:
+        for file_path in files:
             try:
-                with open(file_path, 'rb') as file:
-                    file_data = file.read()
+                # Read file in binary mode
+                with open(file_path, 'rb') as f:
+                    content = f.read()
+                    filename = os.path.basename(file_path)
+
+                    # Convert binary content to base64 string for safe transmission
+                    import base64
+                    content_b64 = base64.b64encode(content).decode('utf-8')
+
                     response = self.send_command(self.active_connection, 'file_transfer', {
-                        'operation': 'send',
-                        'filename': os.path.basename(file_path),
-                        'destination': destination,
-                        'data': file_data.decode('utf-8', errors='ignore')
+                        'operation': 'upload',
+                        'filename': filename,
+                        'content': content_b64,
+                        'encoding': 'base64'  # Indicate the encoding used
                     })
 
-                if response and response.get('status') == 'success':
-                    self.transfer_log.insert('end', f"Transferred: {file_path}\n")
-                else:
-                    self.transfer_log.insert('end', f"Failed: {file_path}\n")
-
-                self.transfer_log.see('end')
+                    if response and response.get('status') == 'success':
+                        self.update_transfer_status(f"Uploaded: {filename}", "green")
+                    else:
+                        error_msg = response.get('message', 'Unknown error') if response else 'No response from server'
+                        self.update_transfer_status(f"Failed to upload {filename}: {error_msg}", "red")
 
             except Exception as e:
-                self.transfer_log.insert('end', f"Error: {file_path} - {str(e)}\n")
-                self.transfer_log.see('end')
+                self.update_transfer_status(f"Error uploading {os.path.basename(file_path)}: {str(e)}", "red")
 
-    def power_action(self, action):
-        """Execute power management action"""
+        self.selected_files_list.delete(0, tk.END)
+        self.refresh_file_list()
+
+    def download_files(self):
+        """Download files using chunked transfer"""
         if not self.active_connection:
-            messagebox.showwarning("Connection", "Please select a computer first")
+            self.update_transfer_status("Please select a computer first", "red")
             return
 
-        if messagebox.askyesno("Confirm Action", f"Execute {action} on the selected computer?"):
-            response = self.send_command(self.active_connection, 'power_management', {
-                'action': action
+        selected = self.server_files_tree.selection()
+        if not selected:
+            self.update_transfer_status("Please select files to download", "red")
+            return
+
+        save_dir = filedialog.askdirectory(title="Select Download Location")
+        if not save_dir:
+            return
+
+        for item in selected:
+            filename = self.server_files_tree.item(item)['text']
+            try:
+                # Initialize download and get file info
+                init_response = self.send_command(self.active_connection, 'file_transfer', {
+                    'operation': 'download_init',
+                    'filename': filename
+                })
+
+                if not init_response or init_response.get('status') != 'success':
+                    self.update_transfer_status(f"Failed to initialize download for {filename}", "red")
+                    continue
+
+                file_info = init_response['data']
+                file_size = file_info['size']
+                chunk_size = file_info['chunk_size']
+
+                # Create the file
+                save_path = os.path.join(save_dir, filename)
+                with open(save_path, 'wb') as f:
+                    offset = 0
+                    while offset < file_size:
+                        # Request chunk
+                        chunk_response = self.send_command(self.active_connection, 'file_transfer', {
+                            'operation': 'download_chunk',
+                            'filename': filename,
+                            'offset': offset,
+                            'chunk_size': chunk_size
+                        })
+
+                        if not chunk_response or chunk_response.get('status') != 'success':
+                            raise Exception(f"Failed to download chunk at offset {offset}")
+
+                        chunk_data = chunk_response['data']
+                        if not chunk_data['chunk']:  # No more data
+                            break
+
+                        # Decode and write chunk
+                        chunk = base64.b64decode(chunk_data['chunk'])
+                        f.write(chunk)
+
+                        # Update progress
+                        offset += chunk_data['size']
+                        progress = (offset / file_size) * 100
+                        self.update_transfer_status(f"Downloading {filename}: {progress:.1f}%", "blue")
+
+                        # Let the GUI update
+                        self.update()
+
+                self.update_transfer_status(f"Downloaded: {filename}", "green")
+
+            except Exception as e:
+                self.update_transfer_status(f"Error downloading {filename}: {str(e)}", "red")
+                logging.error(f"Download error for {filename}: {str(e)}")
+                if os.path.exists(save_path):
+                    try:
+                        os.remove(save_path)  # Clean up partial download
+                    except:
+                        pass
+
+        self.refresh_file_list()
+
+    def refresh_file_list(self):
+        """Refresh the server file list"""
+        if not self.active_connection:
+            self.update_transfer_status("Please select a computer first", "red")
+            return
+
+        try:
+            response = self.send_command(self.active_connection, 'file_transfer', {
+                'operation': 'list_files'
             })
 
             if response and response.get('status') == 'success':
-                messagebox.showinfo("Power Management", f"{action.title()} initiated")
+                # Clear existing items
+                for item in self.server_files_tree.get_children():
+                    self.server_files_tree.delete(item)
+
+                # Add files to tree
+                for file in response['data']:
+                    size = format_file_size(file['size'])
+                    modified = datetime.fromtimestamp(file['modified']).strftime('%Y-%m-%d %H:%M')
+
+                    self.server_files_tree.insert('', 'end', text=file['name'],
+                                                  values=(size, file['type'], modified))
+
+                self.update_transfer_status("File list updated", "green")
             else:
-                messagebox.showerror("Power Management Error", "Failed to execute power action")
+                self.update_transfer_status("Failed to get file list", "red")
+
+        except Exception as e:
+            self.update_transfer_status(f"Error refreshing file list: {str(e)}", "red")
+
+    def filter_files(self, event=None):
+        """Filter files based on search text"""
+        search_term = self.file_filter.get().lower()
+
+        # Get all items (including detached ones)
+        all_items = []
+        visible_items = []
+
+        # First pass: identify all items and which should be visible
+        for item in self.server_files_tree.get_children():
+            all_items.append(item)
+            filename = self.server_files_tree.item(item)['text'].lower()
+            if search_term in filename:
+                visible_items.append(item)
+            else:
+                self.server_files_tree.detach(item)
+
+        # Second pass: reattach visible items in order
+        for index, item in enumerate(visible_items):
+            self.server_files_tree.reattach(item, '', index)
+
+    def update_transfer_status(self, message, color="white"):
+        """Update transfer status with color"""
+        self.transfer_status.configure(text=message, text_color=color)
 
     def power_action_with_confirmation(self, action, confirm_msg):
         """Execute power action with confirmation for single or multiple computers"""
@@ -1147,21 +1349,62 @@ class MCCClient(ctk.CTk):
             print(f"Error refreshing network info: {str(e)}")
 
     def initialize_monitoring(self):
-        """Initialize monitoring thread"""
-        self.monitoring_thread = threading.Thread(target=self.monitor_resources, daemon=True)
+        """Initialize monitoring thread safely"""
+        if hasattr(self, 'monitoring_thread'):
+            return  # Don't create multiple threads
+
+        self.monitoring_thread = threading.Thread(
+            target=self.monitor_resources,
+            daemon=True  # Make it a daemon thread
+        )
         self.monitoring_thread.start()
+        logging.info("Monitoring thread started")
 
     def monitor_resources(self):
-        """Monitor system resources with tab awareness"""
-        while True:
+        """Monitor system resources with shutdown check"""
+        logging.info("Starting resource monitoring")
+        while getattr(self, 'running', True):  # Safe attribute access
             try:
+                if not hasattr(self, 'active_connection'):
+                    time.sleep(2)
+                    continue
+
                 if self.active_connection and self.monitoring_active:
                     if hasattr(self, 'cpu_progress') and hasattr(self, 'mem_progress'):
                         self.refresh_monitoring()
                 time.sleep(2)  # Reduced update frequency
             except Exception as e:
-                print(f"Monitor resources error: {str(e)}")
-                time.sleep(2)
+                logging.error(f"Monitor resources error: {str(e)}")
+                time.sleep(2)  # Wait before trying again
+
+        logging.info("Resource monitoring stopped")
+
+    def on_closing(self):
+        """Handle window closing event"""
+        try:
+            # Set flag to stop monitoring threads
+            self.running = False
+
+            # Close all connections
+            for conn_id in list(self.connections.keys()):
+                try:
+                    self.connections[conn_id]['socket'].close()
+                except:
+                    pass
+
+            logging.info("Closing all connections")
+            self.connections.clear()
+
+            # Wait for threads to finish
+            if hasattr(self, 'monitoring_thread') and self.monitoring_thread.is_alive():
+                self.monitoring_thread.join(timeout=1.0)
+
+            logging.info("Application shutting down")
+            self.quit()
+
+        except Exception as e:
+            logging.error(f"Error during shutdown: {str(e)}")
+            self.quit()
 
     def on_tab_change(self, event):
         """Handle tab changes with widget state management"""
@@ -1193,31 +1436,18 @@ class MCCClient(ctk.CTk):
         except Exception as e:
             print(f"Error during tab change: {str(e)}")
 
-    def safe_widget_destroy(self, widget):
-        """Safely destroy a widget if it exists"""
-        try:
-            if hasattr(self, widget) and getattr(self, widget).winfo_exists():
-                getattr(self, widget).destroy()
-        except Exception:
-            pass
 
-    def safe_widget_update(self, widget, **kwargs):
-        """Safely update a widget's properties if it exists"""
-        try:
-            if hasattr(self, widget) and getattr(self, widget).winfo_exists():
-                getattr(self, widget).configure(**kwargs)
-                return True
-        except Exception:
-            pass
-        return False
-
-
-def check_widget_exists(widget):
-    """Safely check if a widget exists and is valid"""
+def format_file_size(size_in_bytes):
+    """Format file size to human-readable format with proper handling"""
     try:
-        return widget.winfo_exists()
-    except Exception:
-        return False
+        size = float(size_in_bytes)  # Convert to float for division
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size < 1024:
+                return f"{size:.1f} {unit}"
+            size /= 1024.0
+        return f"{size:.1f} TB"
+    except (TypeError, ValueError):
+        return "0 B"  # Return default value if input is invalid
 
 
 def format_bytes(bytes_value):
