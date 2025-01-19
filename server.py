@@ -9,47 +9,77 @@ from datetime import datetime
 import winreg
 import logging
 from cryptography.fernet import Fernet
+import sys
+import traceback
 
 
 class MCCServer:
     def __init__(self, host='0.0.0.0', port=5000):
+        # Setup logging first
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+            handlers=[
+                logging.FileHandler('server.log'),
+                logging.StreamHandler(sys.stdout)
+            ]
+        )
+
+        logging.info("Starting MCC Server...")
+
         self.host = host
         self.port = port
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.clients = {}
         self.encryption_key = Fernet.generate_key()
         self.cipher_suite = Fernet(self.encryption_key)
+        self.running = True
 
-        # Setup logging
-        logging.basicConfig(
-            filename='mcc_server.log',
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s'
-        )
+        # Create Team Document directory
+        self.team_documents_path = os.path.join(os.path.expanduser("~"), "Documents", "Team Document")
+        try:
+            os.makedirs(self.team_documents_path, exist_ok=True)
+            logging.info(f"Team Document directory initialized at: {self.team_documents_path}")
+        except Exception as e:
+            logging.error(f"Failed to create Team Document directory: {str(e)}")
+            logging.error(traceback.format_exc())
 
     def start(self):
-        """Start the server and listen for connections"""
+        """Start the server with graceful shutdown support"""
         try:
             self.server_socket.bind((self.host, self.port))
             self.server_socket.listen(2)
+            self.server_socket.settimeout(1.0)  # Add timeout for shutdown checks
             logging.info(f"Server started on {self.host}:{self.port}")
 
-            while True:
-                client_socket, address = self.server_socket.accept()
-                client_handler = threading.Thread(
-                    target=self.handle_client,
-                    args=(client_socket, address)
-                )
-                client_handler.start()
+            while self.running:
+                try:
+                    client_socket, address = self.server_socket.accept()
+                    client_handler = threading.Thread(
+                        target=self.handle_client,
+                        args=(client_socket, address)
+                    )
+                    client_handler.daemon = True  # Make thread daemon
+                    client_handler.start()
+                except socket.timeout:
+                    continue  # Check running flag every second
+                except Exception as e:
+                    logging.error(f"Error accepting connection: {str(e)}")
+                    if self.running:  # Only log if not shutting down
+                        logging.exception("Server error")
 
         except Exception as e:
             logging.error(f"Server error: {str(e)}")
-            raise
+        finally:
+            self.stop()
 
     def handle_client(self, client_socket, address):
-        """Handle individual client connections"""
+        """Handle client with shutdown check"""
         try:
-            # Send encryption key immediately after connection
+            client_socket.settimeout(1.0)  # Add timeout for shutdown checks
+            logging.info(f"New connection from {address}")
+
+            # Send encryption key
             client_socket.send(self.encryption_key)
 
             self.clients[address] = {
@@ -57,27 +87,37 @@ class MCCServer:
                 'last_seen': datetime.now(),
                 'system_info': self.get_system_info()
             }
-            logging.info(f"New connection from {address}, encryption key sent")
 
-            while True:
-                encrypted_data = client_socket.recv(4096)
-                if not encrypted_data:
+            while self.running:
+                try:
+                    encrypted_data = client_socket.recv(4096)
+                    if not encrypted_data:
+                        break
+
+                    data = self.cipher_suite.decrypt(encrypted_data).decode()
+                    command = json.loads(data)
+                    response = self.process_command(command)
+
+                    encrypted_response = self.cipher_suite.encrypt(
+                        json.dumps(response).encode()
+                    )
+                    client_socket.send(encrypted_response)
+
+                except socket.timeout:
+                    continue  # Check running flag every second
+                except Exception as e:
+                    logging.error(f"Error handling client {address}: {str(e)}")
                     break
 
-                data = self.cipher_suite.decrypt(encrypted_data).decode()
-                command = json.loads(data)
-                response = self.process_command(command)
-
-                encrypted_response = self.cipher_suite.encrypt(
-                    json.dumps(response).encode()
-                )
-                client_socket.send(encrypted_response)
-
         except Exception as e:
-            logging.error(f"Error handling client {address}: {str(e)}")
+            logging.error(f"Client handler error for {address}: {str(e)}")
         finally:
             self.clients.pop(address, None)
-            client_socket.close()
+            try:
+                client_socket.close()
+            except:
+                pass
+            logging.info(f"Connection closed from {address}")
 
     def get_system_info(self):
         """Gather system information"""
@@ -178,7 +218,7 @@ class MCCServer:
                                     if not name or name in seen_programs:
                                         continue
 
-                                    # Try to get version
+                                    # Try to get a version
                                     try:
                                         version = winreg.QueryValueEx(subkey, "DisplayVersion")[0].strip()
                                     except:
@@ -281,21 +321,112 @@ class MCCServer:
             }
 
     def handle_file_transfer(self, data):
-        """Handle file transfer operations"""
-        operation = data.get('operation')
-        filepath = data.get('filepath')
+        """Handle file transfer with chunked transfer support"""
+        try:
+            # Check if Team Document directory exists
+            if not os.path.exists(self.team_documents_path):
+                os.makedirs(self.team_documents_path, exist_ok=True)
+                logging.info(f"Created Team Document directory: {self.team_documents_path}")
 
-        if operation == 'receive':
-            try:
-                with open(filepath, 'rb') as file:
-                    return {
-                        'status': 'success',
-                        'data': file.read().decode('utf-8')
+            operation = data.get('operation')
+            logging.info(f"File transfer operation requested: {operation}")
+
+            if operation == 'list_files':
+                # List all files in Team Document directory
+                files = []
+                for file in os.listdir(self.team_documents_path):
+                    file_path = os.path.join(self.team_documents_path, file)
+                    if os.path.isfile(file_path):
+                        files.append({
+                            'name': file,
+                            'size': os.path.getsize(file_path),
+                            'type': os.path.splitext(file)[1],
+                            'modified': os.path.getmtime(file_path)
+                        })
+                return {'status': 'success', 'data': files}
+
+            elif operation == 'download_init':
+                # Initialize download and return file info
+                filename = data.get('filename')
+                if not filename:
+                    return {'status': 'error', 'message': 'Missing filename'}
+
+                file_path = os.path.join(self.team_documents_path, filename)
+                if not os.path.exists(file_path):
+                    return {'status': 'error', 'message': f'File {filename} not found'}
+
+                file_size = os.path.getsize(file_path)
+                return {
+                    'status': 'success',
+                    'data': {
+                        'filename': filename,
+                        'size': file_size,
+                        'chunk_size': 4096  # Size of chunks we'll use
                     }
-            except Exception as e:
-                return {'status': 'error', 'message': str(e)}
+                }
 
-        return {'status': 'error', 'message': 'Invalid file operation'}
+            elif operation == 'download_chunk':
+                # Send a specific chunk of the file
+                filename = data.get('filename')
+                offset = data.get('offset', 0)
+                chunk_size = data.get('chunk_size', 4096)
+
+                file_path = os.path.join(self.team_documents_path, filename)
+
+                with open(file_path, 'rb') as f:
+                    f.seek(offset)
+                    chunk = f.read(chunk_size)
+
+                    if chunk:  # If we got data
+                        import base64
+                        chunk_b64 = base64.b64encode(chunk).decode('utf-8')
+                        return {
+                            'status': 'success',
+                            'data': {
+                                'chunk': chunk_b64,
+                                'size': len(chunk),
+                                'offset': offset
+                            }
+                        }
+                    else:  # No more data
+                        return {
+                            'status': 'success',
+                            'data': {
+                                'chunk': None,
+                                'size': 0,
+                                'offset': offset
+                            }
+                        }
+
+            elif operation == 'upload':
+                # Handle file upload to server
+                filename = data.get('filename')
+                content = data.get('content')
+
+                if not filename or not content:
+                    return {'status': 'error', 'message': 'Missing filename or content'}
+
+                try:
+                    file_path = os.path.join(self.team_documents_path, filename)
+                    import base64
+                    decoded_content = base64.b64decode(content)
+
+                    with open(file_path, 'wb') as f:
+                        f.write(decoded_content)
+
+                    logging.info(f"File uploaded successfully: {filename}")
+                    return {'status': 'success', 'message': f'File {filename} uploaded successfully'}
+
+                except Exception as e:
+                    logging.error(f"Error saving file {filename}: {str(e)}")
+                    return {'status': 'error', 'message': f'Error saving file: {str(e)}'}
+
+            return {'status': 'error', 'message': 'Invalid operation'}
+
+        except Exception as e:
+            logging.error(f"File transfer error: {str(e)}")
+            logging.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
 
     def handle_command_execution(self, data):
         """Execute system commands"""
@@ -329,7 +460,31 @@ class MCCServer:
             }
         }
 
+    def stop(self):
+        """Stop the server gracefully"""
+        logging.info("Shutting down server...")
+        self.running = False
+
+        # Close all client connections
+        for client in list(self.clients.values()):
+            try:
+                client['socket'].close()
+            except:
+                pass
+
+        # Close server socket
+        try:
+            self.server_socket.close()
+        except:
+            pass
+
+        logging.info("Server shutdown complete")
+
 
 if __name__ == "__main__":
     server = MCCServer()
-    server.start()
+    try:
+        server.start()
+    except KeyboardInterrupt:
+        logging.info("Received shutdown signal")
+        server.stop()
