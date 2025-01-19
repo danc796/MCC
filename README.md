@@ -16,8 +16,9 @@ Features:
 2. Software Inventory:
    - Automatically list all installed programs on each computer.
 
-3. File Transfer: ---1,2
-   - Facilitate quick file transfers between the administrator’s system and client systems.
+3. File Transfer: ---2,3
+   - Transferring files between the client and the system administrator
+   - Transferring files from the system administrator to clients
    - Implement drag-and-drop functionality for ease of use.
 
 4. Power Management:
@@ -25,7 +26,7 @@ Features:
    - Log off idle users or lock screens remotely.
    - Schedule power operations to save energy during non-working hours.
 
-5. Multi-Computer Command Execution: ---1
+5. Command Execution: ---1
    - Run scripts or commands (batch scripts or PowerShell commands).
 
 6. Remote Task Automation: ---1,2
