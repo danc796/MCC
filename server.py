@@ -184,7 +184,7 @@ class MCCServer:
         }
 
     def handle_software_inventory(self, data):
-        """Get installed software inventory without source tracking"""
+        """Get installed software inventory with improved registry handling"""
         print("\n=== Starting Software Inventory Scan ===")
         software_list = []
 
@@ -205,52 +205,58 @@ class MCCServer:
             seen_programs = set()
 
             for reg_root, key_path in keys_to_check:
+                reg_key = None
                 try:
                     reg_key = winreg.OpenKey(reg_root, key_path)
+                    subkey_count, _, _ = winreg.QueryInfoKey(reg_key)
 
-                    for i in range(winreg.QueryInfoKey(reg_key)[0]):
+                    for i in range(subkey_count):
+                        subkey = None
                         try:
                             subkey_name = winreg.EnumKey(reg_key, i)
-                            with winreg.OpenKey(reg_key, subkey_name) as subkey:
-                                try:
-                                    # Try to get program name
-                                    name = winreg.QueryValueEx(subkey, "DisplayName")[0].strip()
-                                    if not name or name in seen_programs:
-                                        continue
+                            subkey = winreg.OpenKey(reg_key, subkey_name)
 
-                                    # Try to get a version
-                                    try:
-                                        version = winreg.QueryValueEx(subkey, "DisplayVersion")[0].strip()
-                                    except:
-                                        version = "N/A"
-
-                                    # Skip system components and irrelevant entries
-                                    skip_keywords = [
-                                        "update", "microsoft", "windows", "cache", "installer",
-                                        "pack", "driver", "system", "component", "setup",
-                                        "prerequisite", "runtime", "application", "sdk"
-                                    ]
-
-                                    if any(keyword in name.lower() for keyword in skip_keywords):
-                                        continue
-
-                                    software_list.append({
-                                        'name': name,
-                                        'version': version
-                                    })
-                                    seen_programs.add(name)
-
-                                except (WindowsError, KeyError):
+                            try:
+                                name = winreg.QueryValueEx(subkey, "DisplayName")[0].strip()
+                                if not name or name in seen_programs:
                                     continue
+
+                                version = "N/A"
+                                try:
+                                    version = winreg.QueryValueEx(subkey, "DisplayVersion")[0].strip()
+                                except (WindowsError, KeyError):
+                                    pass
+
+                                # Skip system components and irrelevant entries
+                                skip_keywords = [
+                                    "update", "microsoft", "windows", "cache", "installer",
+                                    "pack", "driver", "system", "component", "setup",
+                                    "prerequisite", "runtime", "application", "sdk"
+                                ]
+
+                                if any(keyword in name.lower() for keyword in skip_keywords):
+                                    continue
+
+                                software_list.append({
+                                    'name': name,
+                                    'version': version
+                                })
+                                seen_programs.add(name)
+
+                            except (WindowsError, KeyError):
+                                continue
+
                         except WindowsError:
                             continue
+                        finally:
+                            if subkey is not None:
+                                winreg.CloseKey(subkey)
+
                 except WindowsError as e:
                     print(f"Error accessing {key_path}: {str(e)}")
                 finally:
-                    try:
+                    if reg_key is not None:
                         winreg.CloseKey(reg_key)
-                    except:
-                        pass
 
             # Sort the list by program name
             software_list.sort(key=lambda x: x['name'].lower())
