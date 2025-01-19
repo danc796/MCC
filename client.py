@@ -12,6 +12,82 @@ from datetime import datetime
 import base64
 
 
+class ToastNotification:
+    def __init__(self, parent):
+        self.parent = parent
+        self.notifications = []
+        self.showing = False
+
+    def show_toast(self, message, category="info"):
+        """Show a toast notification with auto-dismiss"""
+        # Configure colors based on category
+        colors = {
+            "success": "#28a745",  # Green
+            "error": "#dc3545",  # Red
+            "info": "#007bff",  # Blue
+            "warning": "#ffc107"  # Yellow
+        }
+        bg_color = colors.get(category, "#6c757d")  # Default gray
+
+        # Create a notification window
+        toast = ctk.CTkFrame(self.parent)
+        toast.configure(fg_color=bg_color)
+
+        # Add a message
+        label = ctk.CTkLabel(
+            toast,
+            text=message,
+            text_color="white",
+            font=("Helvetica", 12)
+        )
+        label.pack(padx=20, pady=10)
+
+        # Position in bottom right
+        screen_width = self.parent.winfo_width()
+        screen_height = self.parent.winfo_height()
+
+        # Add to notifications queue
+        self.notifications.append({
+            'widget': toast,
+            'start_time': self.parent.after(0, lambda: None)  # Current time
+        })
+
+        # Show notification if not already showing
+        if not self.showing:
+            self._show_next_notification()
+
+    def _show_next_notification(self):
+        """Show the next notification in queue"""
+        if not self.notifications:
+            self.showing = False
+            return
+
+        self.showing = True
+        notification = self.notifications[0]
+        toast = notification['widget']
+
+        # Position toast
+        toast.place(
+            relx=1,
+            rely=1,
+            anchor="se",
+            x=-20,
+            y=-20
+        )
+
+        # Schedule removal
+        self.parent.after(3000, lambda: self._remove_notification(notification))
+
+    def _remove_notification(self, notification):
+        """Remove a notification and show next if any"""
+        if notification in self.notifications:
+            self.notifications.remove(notification)
+            notification['widget'].destroy()
+
+            # Show the next notification if any
+            self._show_next_notification()
+
+
 class MCCClient(ctk.CTk):
     def __init__(self):
         """Initialize the client with proper flag initialization"""
@@ -48,6 +124,9 @@ class MCCClient(ctk.CTk):
 
         # Set up shutdown handler
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+        # Initialize a toast notification system
+        self.toast = ToastNotification(self)
 
         # Initialize monitoring LAST
         self.initialize_monitoring()
@@ -341,7 +420,7 @@ class MCCClient(ctk.CTk):
             ).pack(pady=5)
 
     def create_file_transfer_tab(self):
-        """Create enhanced file transfer tab with drag-and-drop support"""
+        """Create enhanced file transfer tab with toast notifications"""
         file_frame = ctk.CTkFrame(self.notebook)
         self.notebook.add(file_frame, text="File Transfer")
 
@@ -355,7 +434,6 @@ class MCCClient(ctk.CTk):
         # Upload Section
         ctk.CTkLabel(left_frame, text="Upload Files", font=("Helvetica", 14, "bold")).pack(pady=5)
 
-        # Drag and drop area
         self.drop_area = ctk.CTkFrame(left_frame, width=300, height=200)
         self.drop_area.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
@@ -393,11 +471,14 @@ class MCCClient(ctk.CTk):
         refresh_btn.pack(side=tk.RIGHT, padx=5)
 
         # File list
-        self.server_files_tree = ttk.Treeview(right_frame, columns=("size", "type", "modified"), show="headings")
+        self.server_files_tree = ttk.Treeview(right_frame, columns=("name", "size", "type", "modified"),
+                                              show="headings")
+        self.server_files_tree.heading("name", text="Name")
         self.server_files_tree.heading("size", text="Size")
         self.server_files_tree.heading("type", text="Type")
         self.server_files_tree.heading("modified", text="Modified")
 
+        self.server_files_tree.column("name", width=200)
         self.server_files_tree.column("size", width=100)
         self.server_files_tree.column("type", width=60)
         self.server_files_tree.column("modified", width=140)
@@ -408,9 +489,9 @@ class MCCClient(ctk.CTk):
         self.download_btn = ctk.CTkButton(right_frame, text="Download Selected", command=self.download_files)
         self.download_btn.pack(pady=10)
 
-        # Status label
-        self.transfer_status = ctk.CTkLabel(file_frame, text="")
-        self.transfer_status.pack(side=tk.BOTTOM, pady=5)
+        # Create notification frame (initially hidden)
+        self.notification_frame = ctk.CTkFrame(self)
+        self.notification_frame.configure(fg_color="transparent")
 
         # Set up drag and drop
         self.setup_drag_drop()
@@ -965,7 +1046,7 @@ class MCCClient(ctk.CTk):
 
         for file_path in files:
             try:
-                # Read file in binary mode
+                # Read a file in binary mode
                 with open(file_path, 'rb') as f:
                     content = f.read()
                     filename = os.path.basename(file_path)
@@ -994,7 +1075,7 @@ class MCCClient(ctk.CTk):
         self.refresh_file_list()
 
     def download_files(self):
-        """Download files using chunked transfer"""
+        """Download files using chunked transfer with improved error handling"""
         if not self.active_connection:
             self.update_transfer_status("Please select a computer first", "red")
             return
@@ -1010,6 +1091,7 @@ class MCCClient(ctk.CTk):
 
         for item in selected:
             filename = self.server_files_tree.item(item)['text']
+            save_path = None
             try:
                 # Initialize download and get file info
                 init_response = self.send_command(self.active_connection, 'file_transfer', {
@@ -1021,9 +1103,19 @@ class MCCClient(ctk.CTk):
                     self.update_transfer_status(f"Failed to initialize download for {filename}", "red")
                     continue
 
-                file_info = init_response['data']
-                file_size = file_info['size']
-                chunk_size = file_info['chunk_size']
+                file_info = init_response.get('data', {})
+                if not isinstance(file_info, dict):
+                    raise ValueError("Invalid file info format received")
+
+                # Validate file size and chunk size
+                try:
+                    file_size = int(file_info.get('size', 0))
+                    chunk_size = int(file_info.get('chunk_size', 4096))
+                    if file_size <= 0 or chunk_size <= 0:
+                        raise ValueError("Invalid file or chunk size")
+                except (TypeError, ValueError) as e:
+                    self.update_transfer_status(f"Invalid file information for {filename}: {str(e)}", "red")
+                    continue
 
                 # Create the file
                 save_path = os.path.join(save_dir, filename)
@@ -1041,37 +1133,59 @@ class MCCClient(ctk.CTk):
                         if not chunk_response or chunk_response.get('status') != 'success':
                             raise Exception(f"Failed to download chunk at offset {offset}")
 
-                        chunk_data = chunk_response['data']
-                        if not chunk_data['chunk']:  # No more data
+                        chunk_data = chunk_response.get('data', {})
+                        if not isinstance(chunk_data, dict):
+                            raise ValueError("Invalid chunk data format")
+
+                        chunk_content = chunk_data.get('chunk')
+                        if not chunk_content:  # No more data
                             break
 
-                        # Decode and write chunk
-                        chunk = base64.b64decode(chunk_data['chunk'])
-                        f.write(chunk)
+                        try:
+                            # Decode and write chunk
+                            chunk = base64.b64decode(chunk_content)
+                            f.write(chunk)
 
-                        # Update progress
-                        offset += chunk_data['size']
-                        progress = (offset / file_size) * 100
-                        self.update_transfer_status(f"Downloading {filename}: {progress:.1f}%", "blue")
+                            # Validate and update progress
+                            chunk_size_received = int(chunk_data.get('size', 0))
+                            if chunk_size_received <= 0:
+                                raise ValueError("Invalid chunk size received")
 
-                        # Let the GUI update
-                        self.update()
+                            offset += chunk_size_received
+                            # Calculate progress with type validation and safety checks
+                            try:
+                                offset_num = float(offset)
+                                file_size_num = float(file_size)
+                                if file_size_num > 0:
+                                    progress = min(100.0, (offset_num / file_size_num) * 100.0)
+                                    self.update_transfer_status(f"Downloading {filename}: {progress:.1f}%", "blue")
+                                else:
+                                    self.update_transfer_status(f"Downloading {filename}...", "blue")
+                            except (TypeError, ValueError):
+                                self.update_transfer_status(f"Downloading {filename}...", "blue")
 
-                self.update_transfer_status(f"Downloaded: {filename}", "green")
+                            # Let the GUI update
+                            self.update()
+
+                        except (TypeError, ValueError) as e:
+                            raise Exception(f"Error processing chunk: {str(e)}")
+
+                    self.update_transfer_status(f"Downloaded: {filename}", "green")
 
             except Exception as e:
                 self.update_transfer_status(f"Error downloading {filename}: {str(e)}", "red")
                 logging.error(f"Download error for {filename}: {str(e)}")
-                if os.path.exists(save_path):
+                # Clean up partial download
+                if save_path and os.path.exists(save_path):
                     try:
-                        os.remove(save_path)  # Clean up partial download
-                    except:
-                        pass
+                        os.remove(save_path)
+                    except Exception as cleanup_error:
+                        logging.error(f"Error cleaning up partial download: {str(cleanup_error)}")
 
         self.refresh_file_list()
 
     def refresh_file_list(self):
-        """Refresh the server file list"""
+        """Refresh the server file list with improved error handling"""
         if not self.active_connection:
             self.update_transfer_status("Please select a computer first", "red")
             return
@@ -1081,25 +1195,62 @@ class MCCClient(ctk.CTk):
                 'operation': 'list_files'
             })
 
-            if response and response.get('status') == 'success':
-                # Clear existing items
-                for item in self.server_files_tree.get_children():
-                    self.server_files_tree.delete(item)
+            if not response or response.get('status') != 'success':
+                error_msg = response.get('message', 'Unknown error') if response else 'No response from server'
+                self.update_transfer_status(f"Failed to get file list: {error_msg}", "red")
+                return
 
-                # Add files to tree
-                for file in response['data']:
-                    size = format_file_size(file['size'])
-                    modified = datetime.fromtimestamp(file['modified']).strftime('%Y-%m-%d %H:%M')
+            # Clear existing items
+            for item in self.server_files_tree.get_children():
+                self.server_files_tree.delete(item)
 
-                    self.server_files_tree.insert('', 'end', text=file['name'],
-                                                  values=(size, file['type'], modified))
+            # Add files to tree with validation
+            file_list = response.get('data', [])
+            if not isinstance(file_list, list):
+                self.update_transfer_status("Invalid file list format received", "red")
+                return
 
-                self.update_transfer_status("File list updated", "green")
-            else:
-                self.update_transfer_status("Failed to get file list", "red")
+            for file in file_list:
+                if not isinstance(file, dict):
+                    logging.warning("Invalid file entry format")
+                    continue
+
+                try:
+                    # Validate required fields
+                    name = str(file.get('name', ''))
+                    if not name:
+                        continue
+
+                    # Validate and format size
+                    try:
+                        size = format_file_size(int(file.get('size', 0)))
+                    except (TypeError, ValueError):
+                        size = "Unknown"
+
+                    # Validate and format type
+                    file_type = str(file.get('type', '')).lstrip('.')
+                    if not file_type:
+                        file_type = "Unknown"
+
+                    # Validate and format modified time
+                    try:
+                        modified_timestamp = float(file.get('modified', 0))
+                        modified = datetime.fromtimestamp(modified_timestamp).strftime('%Y-%m-%d %H:%M')
+                    except (TypeError, ValueError, OSError):
+                        modified = "Unknown"
+
+                    self.server_files_tree.insert('', 'end',
+                                                  values=(name, size, file_type, modified))
+
+                except Exception as e:
+                    logging.error(f"Error processing file entry: {str(e)}")
+                    continue
+
+            self.update_transfer_status("File list updated", "green")
 
         except Exception as e:
             self.update_transfer_status(f"Error refreshing file list: {str(e)}", "red")
+            logging.error(f"File list refresh error: {str(e)}")
 
     def filter_files(self, event=None):
         """Filter files based on search text"""
@@ -1123,8 +1274,15 @@ class MCCClient(ctk.CTk):
             self.server_files_tree.reattach(item, '', index)
 
     def update_transfer_status(self, message, color="white"):
-        """Update transfer status with color"""
-        self.transfer_status.configure(text=message, text_color=color)
+        """Updated to use toast notifications"""
+        category_map = {
+            "red": "error",
+            "green": "success",
+            "blue": "info",
+            "white": "info"
+        }
+        category = category_map.get(color, "info")
+        self.toast.show_toast(message, category)
 
     def power_action_with_confirmation(self, action, confirm_msg):
         """Execute power action with confirmation for single or multiple computers"""
@@ -1435,6 +1593,54 @@ class MCCClient(ctk.CTk):
 
         except Exception as e:
             print(f"Error during tab change: {str(e)}")
+
+    def show_notification(self, message, status):
+        """Show a toast notification that automatically disappears"""
+        # Create notification with appropriate color based on status
+        notification = ctk.CTkFrame(self.notification_frame)
+
+        # Configure colors based on status
+        if status == "green":
+            bg_color = "#28a745"
+        elif status == "red":
+            bg_color = "#dc3545"
+        elif status == "blue":
+            bg_color = "#007bff"
+        else:
+            bg_color = "#6c757d"
+
+        notification.configure(fg_color=bg_color)
+
+        # Add message label
+        message_label = ctk.CTkLabel(
+            notification,
+            text=message,
+            text_color="white",
+            font=("Helvetica", 12)
+        )
+        message_label.pack(padx=15, pady=10)
+
+        # Position the notification at the bottom-right corner
+        self.notification_frame.place(
+            relx=1,
+            rely=1,
+            anchor="se",
+            x=-20,
+            y=-20
+        )
+
+        notification.pack(pady=5)
+
+        # Schedule notification removal
+        self.after(3000, lambda: self.remove_notification(notification))
+
+    def remove_notification(self, notification):
+        """Remove the notification widget"""
+        notification.destroy()
+
+        # If no more notifications, hide the frame
+        if not self.notification_frame.winfo_children():
+            self.notification_frame.place_forget()
 
 
 def format_file_size(size_in_bytes):
