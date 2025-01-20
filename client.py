@@ -1,10 +1,10 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+import customtkinter as ctk
 import socket
 import json
 import threading
 from cryptography.fernet import Fernet
-import customtkinter as ctk
 import time
 import os
 import logging
@@ -434,13 +434,8 @@ class MCCClient(ctk.CTk):
         # Upload Section
         ctk.CTkLabel(left_frame, text="Upload Files", font=("Helvetica", 14, "bold")).pack(pady=5)
 
-        self.drop_area = ctk.CTkFrame(left_frame, width=300, height=200)
-        self.drop_area.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
-
-        drop_label = ctk.CTkLabel(self.drop_area, text="Drag and drop files here\nor")
-        drop_label.pack(pady=(40, 5))
-
-        browse_btn = ctk.CTkButton(self.drop_area, text="Browse Files", command=self.browse_files)
+        # Browse button at the top
+        browse_btn = ctk.CTkButton(left_frame, text="Browse Files", command=self.browse_files)
         browse_btn.pack(pady=5)
 
         # Selected files list
@@ -456,7 +451,7 @@ class MCCClient(ctk.CTk):
         self.upload_btn = ctk.CTkButton(left_frame, text="Upload to Team Document", command=self.upload_files)
         self.upload_btn.pack(pady=10)
 
-        # Download Section
+        # Download Section (right side) stays the same
         ctk.CTkLabel(right_frame, text="Team Document Files", font=("Helvetica", 14, "bold")).pack(pady=5)
 
         # Refresh and filter frame
@@ -492,9 +487,6 @@ class MCCClient(ctk.CTk):
         # Create notification frame (initially hidden)
         self.notification_frame = ctk.CTkFrame(self)
         self.notification_frame.configure(fg_color="transparent")
-
-        # Set up drag and drop
-        self.setup_drag_drop()
 
     def create_remote_desktop_tab(self):  # Renamed from create_network_tab
         """Create the remote desktop tab"""
@@ -682,7 +674,7 @@ class MCCClient(ctk.CTk):
             if len(json_data.encode()) > 4000:  # Less than our recv buffer size
                 # For file transfer, use chunked transfer
                 if command_type == 'file_transfer' and data.get('operation') == 'upload':
-                    return self.send_large_file(connection, data)
+                    return send_large_file(connection, data)
 
             # Regular command sending
             encrypted_data = connection['cipher_suite'].encrypt(json_data.encode())
@@ -709,84 +701,6 @@ class MCCClient(ctk.CTk):
         except Exception as e:
             print(f"Send command error: {str(e)}")
             return None
-
-    def send_large_file(self, connection, data):
-        """Handle large file uploads using chunked transfer"""
-        try:
-            # Send initial command to start file transfer
-            start_command = {
-                'type': 'file_transfer',
-                'data': {
-                    'operation': 'start_upload',
-                    'filename': data['filename'],
-                    'encoding': 'base64'
-                }
-            }
-
-            encrypted_start = connection['cipher_suite'].encrypt(json.dumps(start_command).encode())
-            connection['socket'].send(encrypted_start)
-
-            # Get confirmation
-            response = connection['socket'].recv(4096)
-            if not response:
-                return {'status': 'error', 'message': 'No response from server'}
-
-            response_data = json.loads(connection['cipher_suite'].decrypt(response).decode())
-            if response_data.get('status') != 'success':
-                return response_data
-
-            # Send file data in chunks
-            chunk_size = 3000  # Smaller than our encryption limit
-            content = data['content']
-            total_chunks = len(content) // chunk_size + (1 if len(content) % chunk_size else 0)
-
-            for i in range(0, len(content), chunk_size):
-                chunk = content[i:i + chunk_size]
-                chunk_command = {
-                    'type': 'file_transfer',
-                    'data': {
-                        'operation': 'upload_chunk',
-                        'filename': data['filename'],
-                        'chunk': chunk,
-                        'chunk_number': i // chunk_size + 1,
-                        'total_chunks': total_chunks
-                    }
-                }
-
-                encrypted_chunk = connection['cipher_suite'].encrypt(json.dumps(chunk_command).encode())
-                connection['socket'].send(encrypted_chunk)
-
-                # Wait for chunk confirmation
-                chunk_response = connection['socket'].recv(4096)
-                if not chunk_response:
-                    return {'status': 'error', 'message': f'Lost connection during chunk {i // chunk_size + 1}'}
-
-                response_data = json.loads(connection['cipher_suite'].decrypt(chunk_response).decode())
-                if response_data.get('status') != 'success':
-                    return response_data
-
-            # Send completion command
-            end_command = {
-                'type': 'file_transfer',
-                'data': {
-                    'operation': 'end_upload',
-                    'filename': data['filename']
-                }
-            }
-
-            encrypted_end = connection['cipher_suite'].encrypt(json.dumps(end_command).encode())
-            connection['socket'].send(encrypted_end)
-
-            # Get final confirmation
-            final_response = connection['socket'].recv(4096)
-            if not final_response:
-                return {'status': 'error', 'message': 'No final confirmation from server'}
-
-            return json.loads(connection['cipher_suite'].decrypt(final_response).decode())
-
-        except Exception as e:
-            print(f"Large file transfer error: {str(e)}")
-            return {'status': 'error', 'message': str(e)}
 
     def update_hardware_info(self, data):
         """Update hardware monitoring displays with widget validation"""
@@ -1005,15 +919,6 @@ class MCCClient(ctk.CTk):
 
         except Exception as e:
             print(f"Refresh monitoring error: {str(e)}")
-
-    def setup_drag_drop(self):
-        """Configure drag and drop functionality using native Tkinter"""
-        # Visual feedback for drag and drop
-        self.drop_area.bind('<Enter>', self.drop_area.configure(fg_color="gray40"))
-        self.drop_area.bind('<Leave>', self.drop_area.configure(fg_color="gray25"))
-
-        # Enable dropping files through the file dialog
-        self.drop_area.bind('<Button-1>', self.browse_files)
 
     def browse_files(self, event=None):
         """Open file browser dialog"""
@@ -1594,53 +1499,84 @@ class MCCClient(ctk.CTk):
         except Exception as e:
             print(f"Error during tab change: {str(e)}")
 
-    def show_notification(self, message, status):
-        """Show a toast notification that automatically disappears"""
-        # Create notification with appropriate color based on status
-        notification = ctk.CTkFrame(self.notification_frame)
 
-        # Configure colors based on status
-        if status == "green":
-            bg_color = "#28a745"
-        elif status == "red":
-            bg_color = "#dc3545"
-        elif status == "blue":
-            bg_color = "#007bff"
-        else:
-            bg_color = "#6c757d"
+def send_large_file(connection, data):
+    """Handle large file uploads using chunked transfer"""
+    try:
+        # Send initial command to start file transfer
+        start_command = {
+            'type': 'file_transfer',
+            'data': {
+                'operation': 'start_upload',
+                'filename': data['filename'],
+                'encoding': 'base64'
+            }
+        }
 
-        notification.configure(fg_color=bg_color)
+        encrypted_start = connection['cipher_suite'].encrypt(json.dumps(start_command).encode())
+        connection['socket'].send(encrypted_start)
 
-        # Add message label
-        message_label = ctk.CTkLabel(
-            notification,
-            text=message,
-            text_color="white",
-            font=("Helvetica", 12)
-        )
-        message_label.pack(padx=15, pady=10)
+        # Get confirmation
+        response = connection['socket'].recv(4096)
+        if not response:
+            return {'status': 'error', 'message': 'No response from server'}
 
-        # Position the notification at the bottom-right corner
-        self.notification_frame.place(
-            relx=1,
-            rely=1,
-            anchor="se",
-            x=-20,
-            y=-20
-        )
+        response_data = json.loads(connection['cipher_suite'].decrypt(response).decode())
+        if response_data.get('status') != 'success':
+            return response_data
 
-        notification.pack(pady=5)
+        # Send file data in chunks
+        chunk_size = 3000  # Smaller than our encryption limit
+        content = data['content']
+        total_chunks = len(content) // chunk_size + (1 if len(content) % chunk_size else 0)
 
-        # Schedule notification removal
-        self.after(3000, lambda: self.remove_notification(notification))
+        for i in range(0, len(content), chunk_size):
+            chunk = content[i:i + chunk_size]
+            chunk_command = {
+                'type': 'file_transfer',
+                'data': {
+                    'operation': 'upload_chunk',
+                    'filename': data['filename'],
+                    'chunk': chunk,
+                    'chunk_number': i // chunk_size + 1,
+                    'total_chunks': total_chunks
+                }
+            }
 
-    def remove_notification(self, notification):
-        """Remove the notification widget"""
-        notification.destroy()
+            encrypted_chunk = connection['cipher_suite'].encrypt(json.dumps(chunk_command).encode())
+            connection['socket'].send(encrypted_chunk)
 
-        # If no more notifications, hide the frame
-        if not self.notification_frame.winfo_children():
-            self.notification_frame.place_forget()
+            # Wait for chunk confirmation
+            chunk_response = connection['socket'].recv(4096)
+            if not chunk_response:
+                return {'status': 'error', 'message': f'Lost connection during chunk {i // chunk_size + 1}'}
+
+            response_data = json.loads(connection['cipher_suite'].decrypt(chunk_response).decode())
+            if response_data.get('status') != 'success':
+                return response_data
+
+        # Send completion command
+        end_command = {
+            'type': 'file_transfer',
+            'data': {
+                'operation': 'end_upload',
+                'filename': data['filename']
+            }
+        }
+
+        encrypted_end = connection['cipher_suite'].encrypt(json.dumps(end_command).encode())
+        connection['socket'].send(encrypted_end)
+
+        # Get final confirmation
+        final_response = connection['socket'].recv(4096)
+        if not final_response:
+            return {'status': 'error', 'message': 'No final confirmation from server'}
+
+        return json.loads(connection['cipher_suite'].decrypt(final_response).decode())
+
+    except Exception as e:
+        print(f"Large file transfer error: {str(e)}")
+        return {'status': 'error', 'message': str(e)}
 
 
 def format_file_size(size_in_bytes):
