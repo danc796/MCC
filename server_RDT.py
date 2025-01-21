@@ -101,7 +101,7 @@ class RDPServer:
             conn.close()
 
     def process_input(self, key, action, x, y):
-        """Process individual input events"""
+        """Process individual input events including keyboard"""
         try:
             if key == 4:  # Mouse move
                 mouse.move(x, y)
@@ -122,14 +122,71 @@ class RDPServer:
                 elif action == 117:
                     ag.mouseUp(button=ag.RIGHT)
 
-            else:  # Keyboard
-                if action == 100:
-                    ag.keyDown(key)
-                elif action == 117:
-                    ag.keyUp(key)
+            else:  # Keyboard input
+                try:
+                    if action == 100:  # Key down
+                        ag.keyDown(self._scan_to_key(key))
+                    elif action == 117:  # Key up
+                        ag.keyUp(self._scan_to_key(key))
+                except KeyError:
+                    print(f"Unrecognized scan code: {key}")
 
         except Exception as e:
             print(f"Input processing error: {e}")
+
+    def _scan_to_key(self, scan_code):
+        """Convert scan code to PyAutoGUI key name"""
+        # Common scan code to key mappings
+        scan_map = {
+            # Letters
+            30: 'a', 48: 'b', 46: 'c', 32: 'd', 18: 'e', 33: 'f', 34: 'g', 35: 'h',
+            23: 'i', 36: 'j', 37: 'k', 38: 'l', 50: 'm', 49: 'n', 24: 'o', 25: 'p',
+            16: 'q', 19: 'r', 31: 's', 20: 't', 22: 'u', 47: 'v', 17: 'w', 45: 'x',
+            21: 'y', 44: 'z',
+
+            # Numbers (main keyboard)
+            2: '1', 3: '2', 4: '3', 5: '4', 6: '5', 7: '6', 8: '7', 9: '8', 10: '9',
+            11: '0',
+
+            # Special keys
+            28: 'enter',
+            1: 'esc',
+            14: 'backspace',
+            15: 'tab',
+            57: 'space',
+            42: 'shift',
+            54: 'rshift',  # Right shift
+            29: 'ctrl',
+            56: 'alt',
+
+            # Arrow keys
+            72: 'up',
+            80: 'down',
+            75: 'left',
+            77: 'right',
+
+            # Function keys
+            59: 'f1',
+            60: 'f2',
+            61: 'f3',
+            62: 'f4',
+            63: 'f5',
+            64: 'f6',
+            65: 'f7',
+            66: 'f8',
+            67: 'f9',
+            68: 'f10',
+            87: 'f11',
+            88: 'f12',
+
+            # Additional keys
+            55: '/',
+            74: '-',
+            78: '+',
+            83: 'del'
+        }
+
+        return scan_map[scan_code]
 
 
 if __name__ == '__main__':
