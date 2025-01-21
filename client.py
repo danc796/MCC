@@ -416,65 +416,47 @@ class MCCClient(ctk.CTk):
                 hover_color=hover_color
             ).pack(pady=5)
 
-    def create_remote_desktop_tab(self):  # Renamed from create_network_tab
-        """Create the remote desktop tab"""
+    def create_remote_desktop_tab(self):
+        """Create the remote desktop tab with centered controls"""
         remote_desktop_frame = ctk.CTkFrame(self.notebook)
-        self.notebook.add(remote_desktop_frame, text="Remote Desktop")  # Changed text from "Network"
+        self.notebook.add(remote_desktop_frame, text="Remote Desktop")
+
+        # Title and message section
+        title_frame = ctk.CTkFrame(remote_desktop_frame)
+        title_frame.pack(pady=20)
+
+        # Title
+        ctk.CTkLabel(
+            title_frame,
+            text="Remote Desktop Control",
+            font=("Helvetica", 20)
+        ).pack()
+
+        # Status message
+        self.rdt_status = ctk.CTkLabel(
+            title_frame,
+            text="Select computer and activate the remote desktop",
+            font=("Helvetica", 12)
+        )
+        self.rdt_status.pack(pady=10)
+
+        # Center frame for the button
+        center_frame = ctk.CTkFrame(remote_desktop_frame)
+        center_frame.pack(expand=True)
+
+        # Activation button
+        self.rdt_button = ctk.CTkButton(
+            center_frame,
+            text="Activate Remote Desktop",
+            # command=self.rdt_run,
+            width=200,
+            height=40
+        )
+        self.rdt_button.pack(pady=20)
 
         # Network statistics
         stats_frame = ctk.CTkFrame(remote_desktop_frame)
         stats_frame.pack(fill=tk.X, padx=5, pady=5)
-
-        # Add labels for network stats
-        self.network_sent_label = ctk.CTkLabel(stats_frame, text="Sent: 0 B")
-        self.network_sent_label.pack(side=tk.LEFT, padx=10)
-
-        self.network_recv_label = ctk.CTkLabel(stats_frame, text="Received: 0 B")
-        self.network_recv_label.pack(side=tk.LEFT, padx=10)
-
-        # Active connections
-        conn_frame = ctk.CTkFrame(remote_desktop_frame)
-        conn_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-        # Add header label
-        ctk.CTkLabel(conn_frame, text="Active Network Connections:").pack(anchor=tk.W, padx=5, pady=5)
-
-        # Create Treeview with scrollbar
-        tree_frame = ttk.Frame(conn_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-        self.connections_tree = ttk.Treeview(
-            tree_frame,
-            columns=("Local", "Remote", "Status", "Type"),
-            show="headings"
-        )
-
-        # Configure columns
-        self.connections_tree.heading("Local", text="Local Address")
-        self.connections_tree.heading("Remote", text="Remote Address")
-        self.connections_tree.heading("Status", text="Status")
-        self.connections_tree.heading("Type", text="Type")
-
-        # Set column widths
-        self.connections_tree.column("Local", width=200)
-        self.connections_tree.column("Remote", width=200)
-        self.connections_tree.column("Status", width=100)
-        self.connections_tree.column("Type", width=100)
-
-        # Add scrollbar
-        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.connections_tree.yview)
-        self.connections_tree.configure(yscrollcommand=scrollbar.set)
-
-        # Pack tree and scrollbar
-        self.connections_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # Add refresh button
-        ctk.CTkButton(
-            remote_desktop_frame,
-            text="Refresh",
-            command=self.refresh_network_info
-        ).pack(pady=5)
 
     def add_connection(self):
         """Add a new remote connection"""
@@ -1011,58 +993,6 @@ class MCCClient(ctk.CTk):
 
         except Exception as e:
             self.update_software_status(f"Error refreshing list: {str(e)}")
-
-    def refresh_network_info(self):
-        """Refresh network information with improved error handling"""
-        if not self.active_connection:
-            return
-
-        try:
-            response = self.send_command(self.active_connection, 'network_monitor', {})
-
-            # Check if we got an error response
-            if not response:
-                return
-            if response.get('status') == 'error':
-                print(f"Error getting network info: {response.get('message', 'Unknown error')}")
-                return
-
-            if response.get('status') == 'success':
-                data = response.get('data', {})
-
-                # Update IO counters
-                io_counters = data.get('io_counters', {})
-                if io_counters:
-                    bytes_sent = format_bytes(io_counters.get('bytes_sent', 0))
-                    bytes_recv = format_bytes(io_counters.get('bytes_recv', 0))
-
-                    self.network_sent_label.configure(text=f"Sent: {bytes_sent}")
-                    self.network_recv_label.configure(text=f"Received: {bytes_recv}")
-
-                # Clear existing items
-                for item in self.connections_tree.get_children():
-                    self.connections_tree.delete(item)
-
-                # Update connections
-                for conn in data.get('connections', []):
-                    try:
-                        laddr = conn.get('laddr', ('0.0.0.0', 0))
-                        raddr = conn.get('raddr', ('0.0.0.0', 0))
-
-                        # Format addresses
-                        local = f"{laddr[0]}:{laddr[1]}" if isinstance(laddr, tuple) else "N/A"
-                        remote = f"{raddr[0]}:{raddr[1]}" if isinstance(raddr, tuple) else "N/A"
-
-                        status = conn.get('status', 'UNKNOWN')
-                        type_ = 'TCP' if conn.get('type', socket.SOCK_STREAM) == socket.SOCK_STREAM else 'UDP'
-
-                        self.connections_tree.insert('', 'end', values=(local, remote, status, type_))
-                    except Exception as e:
-                        print(f"Error processing connection: {str(e)}")
-                        continue
-
-        except Exception as e:
-            print(f"Error refreshing network info: {str(e)}")
 
     def initialize_monitoring(self):
         """Initialize monitoring thread safely"""
