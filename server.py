@@ -10,7 +10,6 @@ import winreg
 import logging
 from cryptography.fernet import Fernet
 import sys
-import traceback
 
 
 class MCCServer:
@@ -34,15 +33,6 @@ class MCCServer:
         self.encryption_key = Fernet.generate_key()
         self.cipher_suite = Fernet(self.encryption_key)
         self.running = True
-
-        # Create Team Document directory
-        self.team_documents_path = os.path.join(os.path.expanduser("~"), "Documents", "Team Document")
-        try:
-            os.makedirs(self.team_documents_path, exist_ok=True)
-            logging.info(f"Team Document directory initialized at: {self.team_documents_path}")
-        except Exception as e:
-            logging.error(f"Failed to create Team Document directory: {str(e)}")
-            logging.error(traceback.format_exc())
 
     def start(self):
         """Start the server with graceful shutdown support"""
@@ -140,7 +130,6 @@ class MCCServer:
             'hardware_monitor': self.handle_hardware_monitor,
             'software_inventory': self.handle_software_inventory,
             'power_management': self.handle_power_management,
-            'file_transfer': self.handle_file_transfer,
             'execute_command': self.handle_command_execution,
             'network_monitor': self.handle_network_monitor
         }
@@ -325,114 +314,6 @@ class MCCServer:
                 'status': 'error',
                 'message': f'Failed to execute power action: {str(e)}'
             }
-
-    def handle_file_transfer(self, data):
-        """Handle file transfer with chunked transfer support"""
-        try:
-            # Check if Team Document directory exists
-            if not os.path.exists(self.team_documents_path):
-                os.makedirs(self.team_documents_path, exist_ok=True)
-                logging.info(f"Created Team Document directory: {self.team_documents_path}")
-
-            operation = data.get('operation')
-            logging.info(f"File transfer operation requested: {operation}")
-
-            if operation == 'list_files':
-                # List all files in Team Document directory
-                files = []
-                for file in os.listdir(self.team_documents_path):
-                    file_path = os.path.join(self.team_documents_path, file)
-                    if os.path.isfile(file_path):
-                        files.append({
-                            'name': file,
-                            'size': os.path.getsize(file_path),
-                            'type': os.path.splitext(file)[1],
-                            'modified': os.path.getmtime(file_path)
-                        })
-                return {'status': 'success', 'data': files}
-
-            elif operation == 'download_init':
-                # Initialize download and return file info
-                filename = data.get('filename')
-                if not filename:
-                    return {'status': 'error', 'message': 'Missing filename'}
-
-                file_path = os.path.join(self.team_documents_path, filename)
-                if not os.path.exists(file_path):
-                    return {'status': 'error', 'message': f'File {filename} not found'}
-
-                file_size = os.path.getsize(file_path)
-                return {
-                    'status': 'success',
-                    'data': {
-                        'filename': filename,
-                        'size': file_size,
-                        'chunk_size': 4096  # Size of chunks we'll use
-                    }
-                }
-
-            elif operation == 'download_chunk':
-                # Send a specific chunk of the file
-                filename = data.get('filename')
-                offset = data.get('offset', 0)
-                chunk_size = data.get('chunk_size', 4096)
-
-                file_path = os.path.join(self.team_documents_path, filename)
-
-                with open(file_path, 'rb') as f:
-                    f.seek(offset)
-                    chunk = f.read(chunk_size)
-
-                    if chunk:  # If we got data
-                        import base64
-                        chunk_b64 = base64.b64encode(chunk).decode('utf-8')
-                        return {
-                            'status': 'success',
-                            'data': {
-                                'chunk': chunk_b64,
-                                'size': len(chunk),
-                                'offset': offset
-                            }
-                        }
-                    else:  # No more data
-                        return {
-                            'status': 'success',
-                            'data': {
-                                'chunk': None,
-                                'size': 0,
-                                'offset': offset
-                            }
-                        }
-
-            elif operation == 'upload':
-                # Handle file upload to server
-                filename = data.get('filename')
-                content = data.get('content')
-
-                if not filename or not content:
-                    return {'status': 'error', 'message': 'Missing filename or content'}
-
-                try:
-                    file_path = os.path.join(self.team_documents_path, filename)
-                    import base64
-                    decoded_content = base64.b64decode(content)
-
-                    with open(file_path, 'wb') as f:
-                        f.write(decoded_content)
-
-                    logging.info(f"File uploaded successfully: {filename}")
-                    return {'status': 'success', 'message': f'File {filename} uploaded successfully'}
-
-                except Exception as e:
-                    logging.error(f"Error saving file {filename}: {str(e)}")
-                    return {'status': 'error', 'message': f'Error saving file: {str(e)}'}
-
-            return {'status': 'error', 'message': 'Invalid operation'}
-
-        except Exception as e:
-            logging.error(f"File transfer error: {str(e)}")
-            logging.error(traceback.format_exc())
-            return {'status': 'error', 'message': str(e)}
 
     def handle_command_execution(self, data):
         """Execute system commands"""
