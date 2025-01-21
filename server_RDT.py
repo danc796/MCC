@@ -1,201 +1,183 @@
 import socket
+import struct
 import threading
-import mss
+import time
+from PIL import ImageGrab
 import cv2
 import numpy as np
-import struct
-import time
-import logging
-from datetime import datetime
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(f'server_log_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'),
-        logging.StreamHandler()
-    ]
-)
+import pyautogui as ag
+import mouse
 
 
-class RemoteDesktopServer:
-    def __init__(self, host='192.168.1.120', port=12345):
-        self.host = host
-        self.port = port
-        self.clients = {}
-        self.server_socket = None
-        self.running = True
+class RDPServer:
+    """Remote Desktop Protocol Server Implementation"""
+
+    def __init__(self, host='0.0.0.0', port=80):
+        # Configuration
+        self.REFRESH_RATE = 0.05
+        self.SCROLL_SENSITIVITY = 5
+        self.IMAGE_QUALITY = 50
+        self.BUFFER_SIZE = 1024
+
+        # Server setup
+        self.host = (host, port)
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.bind(self.host)
+        self.socket.listen(1)
+
+        # Screen capture state
+        self.current_image = None
+        self.current_image_bytes = None
         self.lock = threading.Lock()
-        self.screen_capture = None
 
-    def initialize_server(self):
-        """Initialize server socket with error handling."""
+        # Keyboard mapping for different platforms
+        self.KEYBOARD_MAPPING = {
+            b'win': self._get_windows_keymap(),
+            b'osx': self._get_osx_keymap(),
+            b'x11': self._get_x11_keymap()
+        }
+
+    def start(self):
+        """Start the RDP server"""
+        print(f"Server started on {self.host[0]}:{self.host[1]}")
+        while True:
+            conn, addr = self.socket.accept()
+            print(f"New connection from {addr}")
+            threading.Thread(target=self._handle_display, args=(conn,)).start()
+            threading.Thread(target=self._handle_input, args=(conn,)).start()
+
+    def _handle_display(self, conn):
+        """Handle screen capture and transmission"""
         try:
-            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.bind((self.host, self.port))
-            self.server_socket.listen(5)
-            logging.info(f"Server initialized on {self.host}:{self.port}")
-            return True
+            # Send initial screen capture
+            self._capture_and_send_screen(conn, force_full=True)
+
+            # Continuous screen update loop
+            while True:
+                time.sleep(self.REFRESH_RATE)
+                self._capture_and_send_screen(conn)
         except Exception as e:
-            logging.error(f"Failed to initialize server: {e}")
-            return False
+            print(f"Display handling error: {e}")
+            conn.close()
 
-    def start_screen_capture(self):
-        """Initialize screen capture thread."""
-        self.screen_capture = ScreenCapture(self)
-        screen_thread = threading.Thread(target=self.screen_capture.capture_loop)
-        screen_thread.daemon = True
-        screen_thread.start()
+    def _capture_and_send_screen(self, conn, force_full=False):
+        """Capture screen and send to client"""
+        with self.lock:
+            # Capture new screen
+            screen = np.array(ImageGrab.grab())
+            _, new_bytes = cv2.imencode(".jpg", screen,
+                                        [cv2.IMWRITE_JPEG_QUALITY, self.IMAGE_QUALITY])
 
-    def accept_connections(self):
-        """Accept and handle incoming client connections."""
-        while self.running:
-            try:
-                client_socket, address = self.server_socket.accept()
-                logging.info(f"New connection from {address}")
+            if self.current_image is None or force_full:
+                # Send full image
+                self._send_frame(conn, new_bytes, is_diff=False)
+                self.current_image = cv2.imdecode(np.array(new_bytes), cv2.IMREAD_COLOR)
+                self.current_image_bytes = new_bytes
+            else:
+                # Calculate and send difference if significant
+                new_image = cv2.imdecode(np.array(new_bytes), cv2.IMREAD_COLOR)
+                diff = cv2.absdiff(new_image, self.current_image)
 
-                with self.lock:
-                    self.clients[address] = client_socket
+                if np.any(diff):
+                    _, diff_bytes = cv2.imencode(".png", diff)
+                    if len(diff_bytes) < len(new_bytes):
+                        self._send_frame(conn, diff_bytes, is_diff=True)
+                    else:
+                        self._send_frame(conn, new_bytes, is_diff=False)
 
-                client_thread = threading.Thread(
-                    target=self.handle_client,
-                    args=(client_socket, address)
-                )
-                client_thread.daemon = True
-                client_thread.start()
+                    self.current_image = new_image
+                    self.current_image_bytes = new_bytes
 
-            except Exception as e:
-                logging.error(f"Error accepting connection: {e}")
-                if not self.running:
+    def _send_frame(self, conn, image_bytes, is_diff):
+        """Send an image frame to the client"""
+        header = struct.pack(">BI", 0 if is_diff else 1, len(image_bytes))
+        conn.sendall(header)
+        conn.sendall(image_bytes)
+
+    def _handle_input(self, conn):
+        """Handle input events from client"""
+        try:
+            # Get client platform
+            platform = conn.recv(3)
+            print(f"Client platform: {platform.decode()}")
+            keymap = self.KEYBOARD_MAPPING.get(platform, {})
+
+            # Input event loop
+            while True:
+                event_data = conn.recv(6)
+                if not event_data or len(event_data) != 6:
                     break
 
-    def handle_client(self, client_socket, address):
-        """Handle individual client connection."""
-        try:
-            while self.running:
-                # Keep connection alive and handle any client-specific logic
-                time.sleep(0.1)
+                key, action, x, y = struct.unpack('>BBHH', event_data)
+                self._process_input_event(key, action, x, y, keymap)
         except Exception as e:
-            logging.error(f"Error handling client {address}: {e}")
-        finally:
-            self.remove_client(address)
+            print(f"Input handling error: {e}")
+            conn.close()
 
-    def broadcast_frame(self, frame_data):
-        """Broadcast frame data to all connected clients."""
-        with self.lock:
-            disconnected_clients = []
+    def _process_input_event(self, key, action, x, y, keymap):
+        """Process individual input events"""
+        if key == 4:  # Mouse move
+            mouse.move(x, y)
+        elif key == 1:  # Left click
+            if action == 100:
+                ag.mouseDown(button=ag.LEFT)
+            elif action == 117:
+                ag.mouseUp(button=ag.LEFT)
+        elif key == 2:  # Scroll
+            ag.scroll(self.SCROLL_SENSITIVITY if action else -self.SCROLL_SENSITIVITY)
+        elif key == 3:  # Right click
+            if action == 100:
+                ag.mouseDown(button=ag.RIGHT)
+            elif action == 117:
+                ag.mouseUp(button=ag.RIGHT)
+        else:  # Keyboard
+            key_name = keymap.get(key)
+            if key_name:
+                if action == 100:
+                    ag.keyDown(key_name)
+                elif action == 117:
+                    ag.keyUp(key_name)
 
-            for address, client in self.clients.items():
-                try:
-                    # Send frame size first
-                    size = len(frame_data)
-                    client.sendall(struct.pack(">L", size))
+    @staticmethod
+    def _get_windows_keymap():
+        """Get Windows keyboard mapping"""
+        return {
+            0x08: 'backspace',
+            0x09: 'tab',
+            0x0d: 'enter',
+            0x10: 'shift',
+            0x11: 'ctrl',
+            0x12: 'alt',
+            # Add more Windows virtual key codes as needed
+        }
 
-                    # Send frame data
-                    client.sendall(frame_data)
-                except Exception as e:
-                    logging.error(f"Error sending to client {address}: {e}")
-                    disconnected_clients.append(address)
+    @staticmethod
+    def _get_osx_keymap():
+        """Get macOS keyboard mapping"""
+        return {
+            51: 'backspace',
+            48: 'tab',
+            36: 'enter',
+            56: 'shift',
+            59: 'ctrl',
+            58: 'alt',
+            # Add more macOS key codes as needed
+        }
 
-            # Remove disconnected clients
-            for address in disconnected_clients:
-                self.remove_client(address)
-
-    def remove_client(self, address):
-        """Safely remove a client."""
-        with self.lock:
-            if address in self.clients:
-                try:
-                    self.clients[address].close()
-                except Exception as e:
-                    logging.error(f"Error closing client socket: {e}")
-                del self.clients[address]
-                logging.info(f"Client {address} removed")
-
-    def shutdown(self):
-        """Shutdown the server and cleanup resources."""
-        self.running = False
-
-        # Close all client connections
-        with self.lock:
-            for client in self.clients.values():
-                try:
-                    client.close()
-                except Exception:
-                    pass
-            self.clients.clear()
-
-        # Close server socket
-        if self.server_socket:
-            try:
-                self.server_socket.close()
-            except Exception:
-                pass
-
-
-class ScreenCapture:
-    def __init__(self, server, fps=30, quality=40):
-        self.server = server
-        self.fps = fps
-        self.quality = quality
-        self.interval = 1 / fps
-
-    def capture_loop(self):
-        """Continuous screen capture loop."""
-        try:
-            with mss.mss() as sct:
-                monitor = sct.monitors[1]  # Primary monitor
-
-                while self.server.running:
-                    start_time = time.time()
-
-                    try:
-                        # Capture screen
-                        screenshot = sct.grab(monitor)
-                        frame = np.array(screenshot)
-
-                        # Encode frame
-                        success, encoded_frame = cv2.imencode(
-                            '.jpg',
-                            frame,
-                            [int(cv2.IMWRITE_JPEG_QUALITY), self.quality]
-                        )
-
-                        if success:
-                            # Broadcast encoded frame
-                            self.server.broadcast_frame(encoded_frame.tobytes())
-
-                        # Maintain target FPS
-                        elapsed = time.time() - start_time
-                        if elapsed < self.interval:
-                            time.sleep(self.interval - elapsed)
-
-                    except Exception as e:
-                        logging.error(f"Error in capture loop: {e}")
-                        time.sleep(1)  # Prevent rapid-fire errors
-
-        except Exception as e:
-            logging.error(f"Critical error in screen capture: {e}")
+    @staticmethod
+    def _get_x11_keymap():
+        """Get X11 keyboard mapping"""
+        return {
+            22: 'backspace',
+            23: 'tab',
+            36: 'enter',
+            50: 'shift',
+            37: 'ctrl',
+            64: 'alt',
+            # Add more X11 key codes as needed
+        }
 
 
-def main():
-    server = RemoteDesktopServer()
-
-    if not server.initialize_server():
-        return
-
-    try:
-        server.start_screen_capture()
-        server.accept_connections()
-    except KeyboardInterrupt:
-        logging.info("Server shutdown requested")
-    except Exception as e:
-        logging.error(f"Critical server error: {e}")
-    finally:
-        server.shutdown()
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    server = RDPServer()
+    server.start()
