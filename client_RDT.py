@@ -9,22 +9,18 @@ import platform
 import numpy as np
 import cv2
 from PIL import Image, ImageTk
-import re
+import keyboard
 
 
 class RDPClient:
-    """Remote Desktop Protocol Client Implementation"""
-
     def __init__(self):
-        # Platform detection
-        self.PLATFORM = self._detect_platform()
-
-        # Configuration
+        # Basic configuration
         self.REFRESH_RATE = 0.05
         self.BUFFER_SIZE = 10240
         self.scale = 1.0
+        self.platform = self._detect_platform()
 
-        # GUI setup
+        # Setup main window
         self.root = tk.Tk()
         self.root.title("RDP Client")
         self.setup_gui()
@@ -33,17 +29,15 @@ class RDPClient:
         self.socket = None
         self.display_window = None
         self.display_thread = None
+        self.keyboard_thread = None
+        self.keyboard_active = False
         self.last_input_time = time.time()
 
         # Screen dimensions
         self.screen_width = 0
         self.screen_height = 0
 
-        # Proxy configuration
-        self.socks5_proxy = None
-
     def _detect_platform(self):
-        """Detect the current platform"""
         if sys.platform == "win32":
             return b'win'
         elif sys.platform == "darwin":
@@ -53,7 +47,6 @@ class RDPClient:
         return b''
 
     def setup_gui(self):
-        """Set up the main GUI window"""
         # Host input
         self.host_var = tk.StringVar(value='127.0.0.1:80')
         tk.Label(self.root, text="Host:").grid(row=0, column=0, padx=10, pady=10)
@@ -67,117 +60,45 @@ class RDPClient:
         scale.set(100)
         scale.grid(row=1, column=1, padx=10, pady=10)
 
-        # Buttons
-        tk.Button(self.root, text="Proxy Settings",
-                  command=self._show_proxy_dialog).grid(row=2, column=0, padx=10, pady=10)
-        tk.Button(self.root, text="Connect",
-                  command=self._toggle_connection).grid(row=2, column=1, padx=10, pady=10)
-
-    def _show_proxy_dialog(self):
-        """Show proxy configuration dialog"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Proxy Settings")
-
-        proxy_var = tk.StringVar(value=self.socks5_proxy or "")
-
-        tk.Label(dialog, text="SOCKS5 Proxy:").grid(row=0, column=0, padx=10, pady=10)
-        tk.Entry(dialog, textvariable=proxy_var, width=20).grid(
-            row=0, column=1, padx=10, pady=10)
-
-        def save_proxy():
-            self.socks5_proxy = proxy_var.get() or None
-            dialog.destroy()
-
-        tk.Button(dialog, text="Save", command=save_proxy).grid(
-            row=1, column=0, columnspan=2, pady=10)
+        # Connect button
+        tk.Button(self.root, text="Connect/Disconnect",
+                  command=self.toggle_connection).grid(row=2, column=0, columnspan=2, padx=10, pady=10)
 
     def _update_scale(self, value):
-        """Update display scale"""
         self.scale = float(value) / 100
         if self.display_window:
             self._resize_display()
 
     def _resize_display(self):
-        """Resize the display window"""
         if self.display_window and hasattr(self.display_window, 'canvas'):
             width = int(self.screen_width * self.scale)
             height = int(self.screen_height * self.scale)
             self.display_window.canvas.config(width=width, height=height)
 
     def _connect(self):
-        """Establish connection to RDP server"""
         try:
-            host, port = self._parse_host(self.host_var.get())
-
-            if self.socks5_proxy:
-                self._connect_via_proxy(host, port)
-            else:
-                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.socket.connect((host, port))
-
+            host, port = self.host_var.get().split(':')
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.connect((host, int(port)))
             self._create_display_window()
 
         except Exception as e:
             messagebox.showerror("Connection Error", str(e))
             self.socket = None
 
-    def _parse_host(self, host_string):
-        """Parse host string into host and port"""
-        try:
-            host, port = host_string.split(':')
-            return host, int(port)
-        except:
-            raise ValueError("Invalid host format. Use host:port")
-
-    def _connect_via_proxy(self, target_host, target_port):
-        """Connect through SOCKS5 proxy"""
-        try:
-            proxy_host, proxy_port = self._parse_host(self.socks5_proxy)
-
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.connect((proxy_host, proxy_port))
-
-            # SOCKS5 handshake
-            self.socket.sendall(struct.pack(">BB", 5, 0))
-            if self.socket.recv(2)[1] != 0:
-                raise ConnectionError("Proxy handshake failed")
-
-            # Connection request
-            if re.match(r'^\d+?\.\d+?\.\d+?\.\d+?$', target_host):
-                # IP address
-                addr = [int(x) for x in target_host.split('.')]
-                req = struct.pack(">BBBB4BH", 5, 1, 0, 1, *addr, target_port)
-            else:
-                # Hostname
-                encoded_host = target_host.encode()
-                req = struct.pack(">BBBB", 5, 1, 0, 3)
-                req += struct.pack(">B", len(encoded_host))
-                req += encoded_host
-                req += struct.pack(">H", target_port)
-
-            self.socket.sendall(req)
-
-            # Verify response
-            if self.socket.recv(10)[1] != 0:
-                raise ConnectionError("Proxy connection failed")
-
-        except Exception as e:
-            raise ConnectionError(f"Proxy connection error: {str(e)}")
-
     def _create_display_window(self):
-        """Create the display window"""
         self.display_window = tk.Toplevel(self.root)
         self.display_window.title("Remote Display")
 
         # Send platform information
-        self.socket.sendall(self.PLATFORM)
+        self.socket.sendall(self.platform)
 
-        # Receive initial frame
+        # Get initial frame
         img_type, img_data = self._receive_frame()
         img = self._process_image(img_data, is_diff=False)
         self.screen_height, self.screen_width = img.shape[:2]
 
-        # Create canvas
+        # Create display canvas
         self.display_window.canvas = tk.Canvas(
             self.display_window,
             width=self.screen_width,
@@ -185,52 +106,105 @@ class RDPClient:
         )
         self.display_window.canvas.pack()
 
-        # Set up event bindings
-        self._setup_input_handlers(self.display_window.canvas)
-
-        # Start display thread
+        # Start input and display handlers
+        self._setup_input_handlers()
         self.display_thread = threading.Thread(target=self._display_loop)
         self.display_thread.start()
 
-    def _display_loop(self):
-        """Main display loop for receiving and showing remote screen updates"""
+    def _setup_input_handlers(self):
+        canvas = self.display_window.canvas
+        canvas.focus_set()
+
+        # Mouse handlers
+        canvas.bind("<Button-1>", lambda e: self._send_mouse_event(1, 100, e.x, e.y))
+        canvas.bind("<ButtonRelease-1>", lambda e: self._send_mouse_event(1, 117, e.x, e.y))
+        canvas.bind("<Button-3>", lambda e: self._send_mouse_event(3, 100, e.x, e.y))
+        canvas.bind("<ButtonRelease-3>", lambda e: self._send_mouse_event(3, 117, e.x, e.y))
+        canvas.bind("<Motion>", self._handle_mouse_motion)
+
+        # Mouse wheel
+        if self.platform in (b'win', b'osx'):
+            canvas.bind("<MouseWheel>", self._handle_mousewheel)
+        else:
+            canvas.bind("<Button-4>", lambda e: self._send_mouse_event(2, 1, e.x, e.y))
+            canvas.bind("<Button-5>", lambda e: self._send_mouse_event(2, 0, e.x, e.y))
+
+        # Keyboard handlers
+        self.keyboard_active = True
+        self.keyboard_thread = threading.Thread(target=self._keyboard_loop)
+        self.keyboard_thread.daemon = True
+        self.keyboard_thread.start()
+
+        self.display_window.protocol("WM_DELETE_WINDOW", self._cleanup)
+
+    def _keyboard_loop(self):
+        """Dedicated keyboard monitoring loop"""
+        while self.keyboard_active:
+            try:
+                event = keyboard.read_event(suppress=True)
+                if event.event_type in ('down', 'up'):
+                    self._send_keyboard_event(event)
+            except Exception as e:
+                print(f"Keyboard error: {e}")
+                break
+
+    def _send_keyboard_event(self, event):
+        """Send keyboard event to server"""
+        if not self.socket:
+            return
+
         try:
-            while True:
-                # Receive and process frame
-                img_type, img_data = self._receive_frame()
-                img = self._process_image(img_data, is_diff=(img_type == 0))
+            # Convert keyboard event to scan code
+            action = 100 if event.event_type == 'down' else 117
+            scan_code = event.scan_code
 
-                # Scale image if needed
-                if self.scale != 1.0:
-                    height, width = img.shape[:2]
-                    new_size = (int(width * self.scale), int(height * self.scale))
-                    img = cv2.resize(img, new_size)
-
-                # Convert to PhotoImage for Tkinter
-                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                pil_img = Image.fromarray(img_rgb)
-                photo_img = ImageTk.PhotoImage(image=pil_img)
-
-                # Update canvas without recreating image object
-                if not hasattr(self.display_window.canvas, 'image_id'):
-                    self.display_window.canvas.image_id = self.display_window.canvas.create_image(
-                        0, 0, anchor=tk.NW, image=photo_img)
-                else:
-                    self.display_window.canvas.itemconfig(
-                        self.display_window.canvas.image_id, image=photo_img)
-                self.display_window.canvas.photo = photo_img  # Prevent garbage collection
-
+            # Send event to server
+            data = struct.pack('>BBHH', scan_code, action, 0, 0)
+            self.socket.sendall(data)
         except Exception as e:
-            print(f"Display loop error: {e}")
+            print(f"Failed to send keyboard event: {e}")
             self._cleanup()
+
+    def _handle_keyboard_event(self, event):
+        """Handle keyboard events using keyboard library"""
+        if self.socket and self.display_window:
+            # Map keyboard event to our protocol
+            action = 100 if event.event_type == keyboard.KEY_DOWN else 117
+            scancode = event.scan_code
+
+            # Send event through socket
+            try:
+                self.socket.sendall(struct.pack('>BBHH', scancode, action, 0, 0))
+            except:
+                self._cleanup()
+
+    def _send_mouse_event(self, button, action, x, y):
+        """Send mouse event to server"""
+        if self.socket:
+            scaled_x = int(x / self.scale)
+            scaled_y = int(y / self.scale)
+            try:
+                self.socket.sendall(struct.pack('>BBHH', button, action, scaled_x, scaled_y))
+            except:
+                self._cleanup()
+
+    def _handle_mouse_motion(self, event):
+        current_time = time.time()
+        if current_time - self.last_input_time >= self.REFRESH_RATE:
+            self.last_input_time = current_time
+            self._send_mouse_event(4, 0, event.x, event.y)
+
+    def _handle_mousewheel(self, event):
+        delta = 1 if event.delta > 0 else 0
+        self._send_mouse_event(2, delta, event.x, event.y)
 
     def _receive_frame(self):
         """Receive a frame from the server"""
-        # Receive header
+        # Get header
         header = self._receive_exact(5)
         img_type, length = struct.unpack(">BI", header)
 
-        # Receive image data
+        # Get image data
         img_data = b''
         while length > 0:
             chunk_size = min(self.BUFFER_SIZE, length)
@@ -241,7 +215,7 @@ class RDPClient:
         return img_type, img_data
 
     def _receive_exact(self, size):
-        """Receive exact number of bytes from socket"""
+        """Receive exact number of bytes"""
         data = b''
         while len(data) < size:
             chunk = self.socket.recv(size - len(data))
@@ -251,69 +225,54 @@ class RDPClient:
         return data
 
     def _process_image(self, img_data, is_diff=False):
-        """Process received image data"""
-        # Decode image
+        """Process received image data with direct color handling"""
         np_arr = np.frombuffer(img_data, dtype=np.uint8)
         img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
         if is_diff and hasattr(self, 'last_image'):
-            # Apply XOR difference
             img = cv2.bitwise_xor(self.last_image, img)
 
         self.last_image = img.copy()
         return img
 
-    def _setup_input_handlers(self, canvas):
-        """Set up input event handlers"""
-        # Give canvas keyboard focus
-        canvas.focus_set()
+    def _display_loop(self):
+        """Main display loop with stable color handling"""
+        try:
+            while True:
+                img_type, img_data = self._receive_frame()
+                img = self._process_image(img_data, is_diff=(img_type == 0))
 
-        # Mouse event bindings
-        canvas.bind("<Button-1>", lambda e: self._send_mouse_event(1, 100, e.x, e.y))
-        canvas.bind("<ButtonRelease-1>", lambda e: self._send_mouse_event(1, 117, e.x, e.y))
-        canvas.bind("<Button-3>", lambda e: self._send_mouse_event(3, 100, e.x, e.y))
-        canvas.bind("<ButtonRelease-3>", lambda e: self._send_mouse_event(3, 117, e.x, e.y))
-        canvas.bind("<Motion>", self._handle_mouse_motion)
+                if self.scale != 1.0:
+                    height, width = img.shape[:2]
+                    new_size = (int(width * self.scale), int(height * self.scale))
+                    img = cv2.resize(img, new_size, interpolation=cv2.INTER_LINEAR)
 
-        # Platform-specific scroll bindings
-        if self.PLATFORM in (b'win', b'osx'):
-            canvas.bind("<MouseWheel>", self._handle_mousewheel_win_osx)
-        else:  # Linux
-            canvas.bind("<Button-4>", lambda e: self._send_mouse_event(2, 1, e.x, e.y))
-            canvas.bind("<Button-5>", lambda e: self._send_mouse_event(2, 0, e.x, e.y))
+                # Simple BGR to RGB conversion without additional processing
+                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        # Keyboard bindings
-        canvas.bind("<KeyPress>", lambda e: self._send_key_event(e.keycode, 100, e.x, e.y))
-        canvas.bind("<KeyRelease>", lambda e: self._send_key_event(e.keycode, 117, e.x, e.y))
+                pil_img = Image.fromarray(img_rgb)
+                photo_img = ImageTk.PhotoImage(image=pil_img)
 
-    def _send_mouse_event(self, button, action, x, y):
-        """Send mouse event to server"""
-        if self.socket:
-            scaled_x = int(x / self.scale)
-            scaled_y = int(y / self.scale)
-            data = struct.pack('>BBHH', button, action, scaled_x, scaled_y)
-            self.socket.sendall(data)
+                if not hasattr(self.display_window.canvas, 'image_id'):
+                    self.display_window.canvas.image_id = self.display_window.canvas.create_image(
+                        0, 0, anchor=tk.NW, image=photo_img)
+                else:
+                    self.display_window.canvas.itemconfig(
+                        self.display_window.canvas.image_id, image=photo_img)
+                self.display_window.canvas.photo = photo_img
 
-    def _handle_mouse_motion(self, event):
-        """Handle mouse motion with rate limiting"""
-        current_time = time.time()
-        if current_time - self.last_input_time >= self.REFRESH_RATE:
-            self.last_input_time = current_time
-            self._send_mouse_event(4, 0, event.x, event.y)
-
-    def _handle_mousewheel_win_osx(self, event):
-        """Handle mousewheel events for Windows and macOS"""
-        delta = 1 if event.delta > 0 else 0
-        self._send_mouse_event(2, delta, event.x, event.y)
-
-    def _send_key_event(self, keycode, action, x, y):
-        """Send keyboard event to server"""
-        if self.socket:
-            data = struct.pack('>BBHH', keycode, action, x, y)
-            self.socket.sendall(data)
+        except Exception as e:
+            print(f"Display error: {e}")
+            self._cleanup()
+        finally:
+            self._cleanup()
 
     def _cleanup(self):
-        """Clean up resources"""
+        """Enhanced cleanup with keyboard handling"""
+        self.keyboard_active = False
+        if self.keyboard_thread:
+            self.keyboard_thread.join(timeout=1.0)
+
         if self.socket:
             self.socket.close()
             self.socket = None
@@ -322,7 +281,7 @@ class RDPClient:
             self.display_window.destroy()
             self.display_window = None
 
-    def _toggle_connection(self):
+    def toggle_connection(self):
         """Toggle connection state"""
         if not self.socket:
             self._connect()
