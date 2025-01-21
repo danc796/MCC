@@ -115,50 +115,53 @@ class RDPClient:
         canvas = self.display_window.canvas
         canvas.focus_set()
 
-        # Mouse handlers
-        canvas.bind("<Button-1>", lambda e: self._send_mouse_event(1, 100, e.x, e.y))
-        canvas.bind("<ButtonRelease-1>", lambda e: self._send_mouse_event(1, 117, e.x, e.y))
-        canvas.bind("<Button-3>", lambda e: self._send_mouse_event(3, 100, e.x, e.y))
-        canvas.bind("<ButtonRelease-3>", lambda e: self._send_mouse_event(3, 117, e.x, e.y))
+        # Updated mouse handlers with new identifiers
+        canvas.bind("<Button-1>", lambda e: self._send_mouse_event(self.MOUSE_LEFT, 100, e.x, e.y))
+        canvas.bind("<ButtonRelease-1>", lambda e: self._send_mouse_event(self.MOUSE_LEFT, 117, e.x, e.y))
+        canvas.bind("<Button-3>", lambda e: self._send_mouse_event(self.MOUSE_RIGHT, 100, e.x, e.y))
+        canvas.bind("<ButtonRelease-3>", lambda e: self._send_mouse_event(self.MOUSE_RIGHT, 117, e.x, e.y))
         canvas.bind("<Motion>", self._handle_mouse_motion)
 
-        # Mouse wheel
         if self.platform in (b'win', b'osx'):
             canvas.bind("<MouseWheel>", self._handle_mousewheel)
         else:
-            canvas.bind("<Button-4>", lambda e: self._send_mouse_event(2, 1, e.x, e.y))
-            canvas.bind("<Button-5>", lambda e: self._send_mouse_event(2, 0, e.x, e.y))
+            canvas.bind("<Button-4>", lambda e: self._send_mouse_event(self.MOUSE_SCROLL, 1, e.x, e.y))
+            canvas.bind("<Button-5>", lambda e: self._send_mouse_event(self.MOUSE_SCROLL, 0, e.x, e.y))
 
-        # Keyboard handlers
         self.keyboard_active = True
         self.keyboard_thread = threading.Thread(target=self._keyboard_loop)
         self.keyboard_thread.daemon = True
         self.keyboard_thread.start()
 
-        self.display_window.protocol("WM_DELETE_WINDOW", self._cleanup)
-
     def _keyboard_loop(self):
-        """Dedicated keyboard monitoring loop"""
+        """Dedicated keyboard monitoring loop with mouse button handling"""
         while self.keyboard_active:
             try:
                 event = keyboard.read_event(suppress=True)
                 if event.event_type in ('down', 'up'):
-                    self._send_keyboard_event(event)
+                    # Check if it's a mouse button event
+                    if event.name in ('mouse_left', 'mouse_right', 'mouse_middle'):
+                        # Handle mouse events as before
+                        button = 1 if event.name == 'mouse_left' else 3 if event.name == 'mouse_right' else 2
+                        action = 100 if event.event_type == 'down' else 117
+                        self._send_mouse_event(button, action, 0, 0)
+                    else:
+                        # Handle keyboard events
+                        self._send_keyboard_event(event)
             except Exception as e:
                 print(f"Keyboard error: {e}")
                 break
 
     def _send_keyboard_event(self, event):
-        """Send keyboard event to server"""
+        """Send keyboard event to server with numeric key handling"""
         if not self.socket:
             return
 
         try:
-            # Convert keyboard event to scan code
             action = 100 if event.event_type == 'down' else 117
             scan_code = event.scan_code
 
-            # Send event to server
+            # Send keyboard event to server
             data = struct.pack('>BBHH', scan_code, action, 0, 0)
             self.socket.sendall(data)
         except Exception as e:
@@ -192,11 +195,11 @@ class RDPClient:
         current_time = time.time()
         if current_time - self.last_input_time >= self.REFRESH_RATE:
             self.last_input_time = current_time
-            self._send_mouse_event(4, 0, event.x, event.y)
+            self._send_mouse_event(self.MOUSE_MOVE, 0, event.x, event.y)
 
     def _handle_mousewheel(self, event):
         delta = 1 if event.delta > 0 else 0
-        self._send_mouse_event(2, delta, event.x, event.y)
+        self._send_mouse_event(self.MOUSE_SCROLL, delta, event.x, event.y)
 
     def _receive_frame(self):
         """Receive a frame from the server"""
@@ -291,6 +294,11 @@ class RDPClient:
     def run(self):
         """Start the client application"""
         self.root.mainloop()
+
+    MOUSE_LEFT = 201
+    MOUSE_SCROLL = 202
+    MOUSE_RIGHT = 203
+    MOUSE_MOVE = 204
 
 
 if __name__ == '__main__':
