@@ -289,5 +289,17 @@ class RDPClient:
 
 
 if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser(description='RDP Client')
+    parser.add_argument('--host', required=True, help='Host IP address')
+    parser.add_argument('--port', required=True, type=int, help='Port number')
+    parser.add_argument('--scale', required=True, type=float, help='Display scale (0.1-1.0)')
+
+    args = parser.parse_args()
+
     client = RDPClient()
+    client.scale = args.scale
+    client.host_var.set(f"{args.host}:{args.port}")
+    client.toggle_connection()  # Automatically connect
     client.run()
