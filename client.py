@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox
 import customtkinter as ctk
 import socket
 import json
@@ -8,6 +8,7 @@ from cryptography.fernet import Fernet
 import time
 import logging
 from datetime import datetime
+import sys
 
 
 class ToastNotification:
@@ -88,45 +89,34 @@ class ToastNotification:
 
 class MCCClient(ctk.CTk):
     def __init__(self):
-        """Initialize the client with proper flag initialization"""
-        # Initialize as CTk
         super().__init__()
 
-        # Set up flags and state FIRST
-        self.running = True  # Flag for monitoring threads
+        self.running = True
         self.active_tab = None
         self.monitoring_active = False
         self.progress_bars = {}
 
-        # Initialize connection management
-        self.connections = {}  # Dictionary to store all connections
-        self.active_connection = None  # Currently selected connection
+        self.connections = {}
+        self.active_connection = None
 
-        # Configure the window
         self.title("Multi Computers Control")
         self.geometry("1200x800")
 
-        # Set the theme
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
-        # Set up logging
         logging.basicConfig(
             filename='mcc_client.log',
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s'
         )
 
-        # Create GUI elements
         self.create_gui()
 
-        # Set up shutdown handler
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-        # Initialize a toast notification system
         self.toast = ToastNotification(self)
 
-        # Initialize monitoring LAST
         self.initialize_monitoring()
 
     def create_gui(self):
@@ -417,22 +407,18 @@ class MCCClient(ctk.CTk):
             ).pack(pady=5)
 
     def create_remote_desktop_tab(self):
-        """Create the remote desktop tab with centered controls"""
         remote_desktop_frame = ctk.CTkFrame(self.notebook)
         self.notebook.add(remote_desktop_frame, text="Remote Desktop")
 
-        # Title and message section
         title_frame = ctk.CTkFrame(remote_desktop_frame)
         title_frame.pack(pady=20)
 
-        # Title
         ctk.CTkLabel(
             title_frame,
             text="Remote Desktop Control",
             font=("Helvetica", 20)
         ).pack()
 
-        # Status message
         self.rdt_status = ctk.CTkLabel(
             title_frame,
             text="Select computer and activate the remote desktop",
@@ -440,21 +426,38 @@ class MCCClient(ctk.CTk):
         )
         self.rdt_status.pack(pady=10)
 
-        # Center frame for the button
+        # Add scale control frame
+        scale_frame = ctk.CTkFrame(remote_desktop_frame)
+        scale_frame.pack(pady=10)
+
+        ctk.CTkLabel(
+            scale_frame,
+            text="Display Scale (%)",
+            font=("Helvetica", 12)
+        ).pack(side=tk.LEFT, padx=5)
+
+        self.scale_slider = ctk.CTkSlider(
+            scale_frame,
+            from_=10,
+            to=100,
+            number_of_steps=90,
+            width=200
+        )
+        self.scale_slider.pack(side=tk.LEFT, padx=5)
+        self.scale_slider.set(100)  # Default to 100%
+
         center_frame = ctk.CTkFrame(remote_desktop_frame)
         center_frame.pack(expand=True)
 
-        # Activation button
         self.rdt_button = ctk.CTkButton(
             center_frame,
             text="Activate Remote Desktop",
-            # command=self.rdt_run,
+            command=self.start_rdp,
             width=200,
             height=40
         )
         self.rdt_button.pack(pady=20)
 
-        # Network statistics
         stats_frame = ctk.CTkFrame(remote_desktop_frame)
         stats_frame.pack(fill=tk.X, padx=5, pady=5)
 
@@ -1025,32 +1028,46 @@ class MCCClient(ctk.CTk):
 
         logging.info("Resource monitoring stopped")
 
-    def on_closing(self):
-        """Handle window closing event"""
-        try:
-            # Set flag to stop monitoring threads
-            self.running = False
+    def start_rdp(self):
+        if not self.active_connection:
+            self.rdt_status.configure(text="Please select a computer first")
+            return
 
-            # Close all connections
-            for conn_id in list(self.connections.keys()):
-                try:
-                    self.connections[conn_id]['socket'].close()
-                except:
-                    pass
+        # Get the scale value from the GUI
+        scale_value = self.scale_slider.get() / 100.0
 
-            logging.info("Closing all connections")
-            self.connections.clear()
+        # Request RDP server start
+        response = self.send_command(self.active_connection, 'start_rdp', {'scale': scale_value})
 
-            # Wait for threads to finish
-            if hasattr(self, 'monitoring_thread') and self.monitoring_thread.is_alive():
-                self.monitoring_thread.join(timeout=1.0)
+        if response and response.get('status') == 'success':
+            ip, port = response['data']['ip'], response['data']['port']
 
-            logging.info("Application shutting down")
-            self.quit()
+            try:
+                # Start RDP client in a new process
+                import subprocess
+                rdp_process = subprocess.Popen([
+                    sys.executable,
+                    'clientRDP.py',
+                    '--host', ip,
+                    '--port', str(port),
+                    '--scale', str(scale_value)
+                ])
 
-        except Exception as e:
-            logging.error(f"Error during shutdown: {str(e)}")
-            self.quit()
+                # Update status
+                self.rdt_status.configure(text="Remote desktop session active")
+
+                # Wait for RDP session to end
+                rdp_process.wait()
+
+                # Clean up RDP server
+                self.send_command(self.active_connection, 'stop_rdp', {})
+                self.rdt_status.configure(text="Remote desktop session ended")
+
+            except Exception as e:
+                self.rdt_status.configure(text=f"RDP Error: {str(e)}")
+                logging.error(f"RDP error: {str(e)}")
+        else:
+            self.rdt_status.configure(text="Failed to start remote desktop")
 
     def on_tab_change(self, event):
         """Handle tab changes with widget state management"""
@@ -1081,6 +1098,33 @@ class MCCClient(ctk.CTk):
 
         except Exception as e:
             print(f"Error during tab change: {str(e)}")
+
+    def on_closing(self):
+        """Handle window closing event"""
+        try:
+            # Set flag to stop monitoring threads
+            self.running = False
+
+            # Close all connections
+            for conn_id in list(self.connections.keys()):
+                try:
+                    self.connections[conn_id]['socket'].close()
+                except:
+                    pass
+
+            logging.info("Closing all connections")
+            self.connections.clear()
+
+            # Wait for threads to finish
+            if hasattr(self, 'monitoring_thread') and self.monitoring_thread.is_alive():
+                self.monitoring_thread.join(timeout=1.0)
+
+            logging.info("Application shutting down")
+            self.quit()
+
+        except Exception as e:
+            logging.error(f"Error during shutdown: {str(e)}")
+            self.quit()
 
 
 def format_bytes(bytes_value):
