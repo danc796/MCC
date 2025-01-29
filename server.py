@@ -10,6 +10,8 @@ import winreg
 import logging
 from cryptography.fernet import Fernet
 import sys
+from serverRDP import RDPServer
+import time
 
 
 class MCCServer:
@@ -34,28 +36,26 @@ class MCCServer:
         self.cipher_suite = Fernet(self.encryption_key)
         self.running = True
 
+        self.rdp_server = None
+        self.rdp_thread = None
+
     def start(self):
-        """Start the server with graceful shutdown support"""
         try:
             self.server_socket.bind((self.host, self.port))
             self.server_socket.listen(2)
-            self.server_socket.settimeout(1.0)  # Add timeout for shutdown checks
-            logging.info(f"Server started on {self.host}:{self.port}")
+            self.server_socket.settimeout(1.0)
 
             while self.running:
                 try:
                     client_socket, address = self.server_socket.accept()
-                    client_handler = threading.Thread(
-                        target=self.handle_client,
-                        args=(client_socket, address)
-                    )
-                    client_handler.daemon = True  # Make thread daemon
+                    client_handler = threading.Thread(target=self.handle_client, args=(client_socket, address))
+                    client_handler.daemon = True
                     client_handler.start()
                 except socket.timeout:
-                    continue  # Check running flag every second
+                    continue
                 except Exception as e:
                     logging.error(f"Error accepting connection: {str(e)}")
-                    if self.running:  # Only log if not shutting down
+                    if self.running:
                         logging.exception("Server error")
 
         except Exception as e:
@@ -64,12 +64,10 @@ class MCCServer:
             self.stop()
 
     def handle_client(self, client_socket, address):
-        """Handle client with shutdown check"""
         try:
-            client_socket.settimeout(1.0)  # Add timeout for shutdown checks
+            client_socket.settimeout(1.0)
             logging.info(f"New connection from {address}")
 
-            # Send encryption key
             client_socket.send(self.encryption_key)
 
             self.clients[address] = {
@@ -88,13 +86,11 @@ class MCCServer:
                     command = json.loads(data)
                     response = self.process_command(command)
 
-                    encrypted_response = self.cipher_suite.encrypt(
-                        json.dumps(response).encode()
-                    )
+                    encrypted_response = self.cipher_suite.encrypt(json.dumps(response).encode())
                     client_socket.send(encrypted_response)
 
                 except socket.timeout:
-                    continue  # Check running flag every second
+                    continue
                 except Exception as e:
                     logging.error(f"Error handling client {address}: {str(e)}")
                     break
@@ -121,7 +117,6 @@ class MCCServer:
         }
 
     def process_command(self, command):
-        """Process incoming commands from clients"""
         cmd_type = command.get('type')
         cmd_data = command.get('data', {})
 
@@ -131,7 +126,9 @@ class MCCServer:
             'software_inventory': self.handle_software_inventory,
             'power_management': self.handle_power_management,
             'execute_command': self.handle_command_execution,
-            'network_monitor': self.handle_network_monitor
+            'network_monitor': self.handle_network_monitor,
+            'start_rdp': self.handle_start_rdp,
+            'stop_rdp': self.handle_stop_rdp
         }
 
         handler = command_handlers.get(cmd_type)
@@ -347,19 +344,63 @@ class MCCServer:
             }
         }
 
+    def handle_start_rdp(self, data):
+        try:
+            # Use the actual server's IP for the RDP connection
+            rdp_host = socket.gethostbyname(socket.gethostname())
+            rdp_port = 5900  # Default RDP port
+
+            # Create and start RDP server
+            if self.rdp_server is None:
+                self.rdp_server = RDPServer(host='0.0.0.0', port=rdp_port)
+                self.rdp_thread = threading.Thread(target=self.rdp_server.start)
+                self.rdp_thread.daemon = True
+                self.rdp_thread.start()
+
+                # Wait for server to start
+                time.sleep(1)
+
+                return {
+                    'status': 'success',
+                    'data': {
+                        'ip': rdp_host,
+                        'port': rdp_port
+                    }
+                }
+            else:
+                return {
+                    'status': 'error',
+                    'message': 'RDP server is already running'
+                }
+
+        except Exception as e:
+            logging.error(f"Failed to start RDP server: {str(e)}")
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+
+    def handle_stop_rdp(self, data):
+        if self.rdp_server:
+            self.rdp_server.stop()
+            self.rdp_server = None
+
+        if self.rdp_thread:
+            self.rdp_thread.join(timeout=5)
+            self.rdp_thread = None
+
+        return {'status': 'success'}
+
     def stop(self):
-        """Stop the server gracefully"""
         logging.info("Shutting down server...")
         self.running = False
 
-        # Close all client connections
         for client in list(self.clients.values()):
             try:
                 client['socket'].close()
             except:
                 pass
 
-        # Close server socket
         try:
             self.server_socket.close()
         except:
