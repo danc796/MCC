@@ -10,7 +10,7 @@ Features:
 1. Hardware Monitoring: ---3,4
    - Monitor CPU, RAM, disk usage, and temperature on all connected computers.
    - Display this information in real time for quick diagnostics.
-   - Automatically collect details about connected devices, like hardware specifications and operating system versions.
+   - collect details about connected devices, like hardware specifications and operating system versions.
    - View logged-in users on each system and their activity status.
 
 2. Software Inventory:
@@ -36,9 +36,8 @@ Features:
    - Install software on multiple computers at once to save time and ensure consistency.
    - Schedule installations during off-peak hours for uninterrupted workflows.
 
-8. Remote Desktop: ---1,2
+8. Remote Desktop:
    - Access and control any computer in the network remotely.
-   - Take screenshots of any computer’s desktop in real time.
 
 9. System Notifications: ---1
    - Send pop-up notifications to one or multiple computers.
