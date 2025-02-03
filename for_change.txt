@@ -1,0 +1,154 @@
+def handle_start_rdp(self, data):
+    try:
+        # Get the server's IP
+        hostname = socket.gethostname()
+        rdp_host = socket.gethostbyname(hostname)
+        rdp_port = 5900  # Default RDP port
+
+        # Check if RDP server is already running
+        if self.rdp_server is not None:
+            logging.warning("RDP server is already running")
+            return {
+                'status': 'success',
+                'data': {
+                    'ip': rdp_host,
+                    'port': rdp_port
+                }
+            }
+
+        # Create and start RDP server
+        logging.info(f"Starting RDP server on {rdp_host}:{rdp_port}")
+        self.rdp_server = RDPServer(host='0.0.0.0', port=rdp_port)
+        self.rdp_thread = threading.Thread(target=self.rdp_server.start)
+        self.rdp_thread.daemon = True
+        self.rdp_thread.start()
+
+        # Give the server a moment to start
+        time.sleep(1)
+
+        # Log successful start
+        logging.info(f"RDP server started successfully on {rdp_host}:{rdp_port}")
+        
+        return {
+            'status': 'success',
+            'data': {
+                'ip': rdp_host,
+                'port': rdp_port
+            }
+        }
+
+    except Exception as e:
+        logging.error(f"Failed to start RDP server: {str(e)}")
+        if self.rdp_server:
+            try:
+                self.rdp_server.stop()
+            except:
+                pass
+            self.rdp_server = None
+        return {
+            'status': 'error',
+            'message': str(e)
+        }
+
+def handle_stop_rdp(self, data):
+    """Stop the RDP server gracefully"""
+    try:
+        if self.rdp_server:
+            logging.info("Stopping RDP server...")
+            self.rdp_server.stop()
+            self.rdp_server = None
+
+            if self.rdp_thread:
+                self.rdp_thread.join(timeout=5)
+                self.rdp_thread = None
+
+            logging.info("RDP server stopped successfully")
+            return {'status': 'success'}
+        else:
+            return {
+                'status': 'success',
+                'message': 'RDP server was not running'
+            }
+    except Exception as e:
+        logging.error(f"Error stopping RDP server: {str(e)}")
+        return {
+            'status': 'error',
+            'message': str(e)
+        }
+
+        class RDPServer:
+    def __init__(self, host='0.0.0.0', port=80):
+        # Configuration
+        self.REFRESH_RATE = 0.05
+        self.SCROLL_SENSITIVITY = 5
+        self.IMAGE_QUALITY = 95
+        self.BUFFER_SIZE = 1024
+
+        # Server setup
+        self.host = (host, port)
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.bind(self.host)
+        self.socket.listen(1)
+        self.running = True  # Add running flag
+
+        # Image state
+        self.last_image = None
+        self.lock = threading.Lock()
+        self.shift_pressed = False
+        
+        # Store active connections
+        self.active_connections = []
+        self.connection_threads = []
+
+    def start(self):
+        """Start the RDP server and listen for connections"""
+        print(f"Server started on {self.host[0]}:{self.host[1]}")
+        self.socket.settimeout(1.0)  # Add timeout to allow clean shutdown
+        
+        while self.running:
+            try:
+                conn, addr = self.socket.accept()
+                print(f"New connection from {addr}")
+                
+                self.active_connections.append(conn)
+                
+                # Start display and input threads for the client
+                display_thread = threading.Thread(target=self.handle_display, args=(conn,))
+                input_thread = threading.Thread(target=self.handle_input, args=(conn,))
+                
+                self.connection_threads.extend([display_thread, input_thread])
+                
+                display_thread.start()
+                input_thread.start()
+                
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.running:  # Only log if we're still meant to be running
+                    print(f"Accept error: {e}")
+
+    def stop(self):
+        """Gracefully stop the RDP server"""
+        print("Stopping RDP server...")
+        self.running = False
+        
+        # Close all active connections
+        for conn in self.active_connections:
+            try:
+                conn.close()
+            except:
+                pass
+        self.active_connections.clear()
+        
+        # Close server socket
+        try:
+            self.socket.close()
+        except:
+            pass
+            
+        # Wait for threads to finish
+        for thread in self.connection_threads:
+            thread.join(timeout=1.0)
+        self.connection_threads.clear()
+        
+        print("RDP server stopped")
