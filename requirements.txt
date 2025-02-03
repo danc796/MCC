@@ -1,0 +1,9 @@
+numpy
+opencv-python
+pyautogui
+mouse
+pillow
+psutil
+cryptography
+keyboard
+customtkinter
