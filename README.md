@@ -5,6 +5,8 @@ By Dan Cohen
 
 The goal of the Multi Computers Control program is to empower IT staff by automating repetitive tasks, providing real-time insights, and offering remote control capabilities—all from a single interface.
 
+for instaling all the import there is a file: requirements.txt and to called him write pip install -r requirements.txt
+
 Features:
 
 1. Hardware Monitoring: ---3,4
