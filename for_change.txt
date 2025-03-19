@@ -1,101 +1,70 @@
-class RDPServer:
-    def __init__(self, host='0.0.0.0', port=80):
-        print(f"Initializing RDP Server on {host}:{port}")
-        # Configuration
-        self.REFRESH_RATE = 0.05
-        self.SCROLL_SENSITIVITY = 5
-        self.IMAGE_QUALITY = 95
-        self.BUFFER_SIZE = 1024
+clientRDP:
+def _cleanup(self):
+    """Enhanced cleanup with keyboard handling"""
+    self.keyboard_active = False
+    if self.keyboard_thread:
+        self.keyboard_thread.join(timeout=1.0)
 
-        # Server setup
-        self.host = host
-        self.port = port
-        self.socket = None  # Don't create socket yet
-        
-        # Add running flag and active connections tracking
-        self.running = True
-        self.active_connections = []
-        self.active_threads = []
+    if self.socket:
+        self.socket.close()
+        self.socket = None
 
-        # Image state
-        self.last_image = None
-        self.lock = threading.Lock()
-        self.shift_pressed = False
+    if self.display_window:
+        self.display_window.destroy()
+        self.display_window = None
 
-    def start(self):
-        """Start the RDP server and listen for connections"""
+    # Ensure that the display thread is also cleaned up
+    if self.display_thread and self.display_thread.is_alive():
+        self.display_thread.join(timeout=1.0)
+cleint:
+def start_rdp(self):
+    if not self.active_connection:
+        self.rdt_status.configure(text="Please select a computer first")
+        return
+
+    # Get the scale value from the GUI
+    scale_value = self.scale_slider.get() / 100.0
+
+    # Request RDP server start
+    response = self.send_command(self.active_connection, 'start_rdp', {'scale': scale_value})
+
+    if response and response.get('status') == 'success':
+        ip, port = response['data']['ip'], response['data']['port']
+
         try:
-            print(f"RDP Server starting on {self.host}:{self.port}")
-            
-            # Create and setup socket
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.bind((self.host, self.port))
-            print("RDP Server bound successfully")
-            
-            print("Setting socket timeout...")
-            self.socket.settimeout(1)
-            print("Starting to listen...")
-            self.socket.listen(1)
-            
-            print(f"RDP Server started and listening on {self.host}:{self.port}")
-            
-            while self.running:
-                try:
-                    print("Waiting for RDP connection...")
-                    conn, addr = self.socket.accept()
-                    print(f"New RDP connection from {addr}")
-                    
-                    # Track active connection
-                    self.active_connections.append(conn)
-                    
-                    # Create and track threads
-                    print("Starting display and input handler threads...")
-                    display_thread = threading.Thread(target=self.handle_display, args=(conn,))
-                    input_thread = threading.Thread(target=self.handle_input, args=(conn,))
-                    
-                    self.active_threads.extend([display_thread, input_thread])
-                    
-                    display_thread.start()
-                    input_thread.start()
-                    print("Handler threads started successfully")
-                    
-                except socket.timeout:
-                    if self.running:
-                        continue
-                except Exception as e:
-                    if self.running:
-                        print(f"Server accept error: {e}")
-                    break
-                    
-        except Exception as e:
-            print(f"RDP Server startup error: {e}")
-            raise
+            # Start RDP client in a new process
+            import subprocess
+            rdp_process = subprocess.Popen([
+                sys.executable,
+                'clientRDP.py',
+                '--host', ip,
+                '--port', str(port),
+                '--scale', str(scale_value)
+            ])
 
-    def stop(self):
-        """Stop the RDP server and clean up"""
-        print("Stopping RDP server...")
-        self.running = False
-        
-        # Close all active connections
-        for conn in self.active_connections[:]:  # Use slice to avoid modification during iteration
-            try:
-                conn.close()
-            except:
-                pass
-            self.active_connections.remove(conn)
-        
-        # Close server socket
-        if self.socket:
-            try:
-                self.socket.close()
-            except:
-                pass
-            self.socket = None
-            
-        # Wait for threads to finish
-        for thread in self.active_threads:
-            if thread.is_alive():
-                thread.join(timeout=1.0)
-        self.active_threads.clear()
-        
-        print("RDP server stopped successfully")
+            # Update status
+            self.rdt_status.configure(text="Remote desktop session active")
+
+            # Wait for RDP session to end
+            rdp_process.wait()
+
+            # Clean up RDP server
+            self.send_command(self.active_connection, 'stop_rdp', {})
+            self.rdt_status.configure(text="Remote desktop session ended")
+
+        except Exception as e:
+            self.rdt_status.configure(text=f"RDP Error: {str(e)}")
+            logging.error(f"RDP error: {str(e)}")
+    else:
+        self.rdt_status.configure(text="Failed to start remote desktop")
+
+serverRDP:
+def handle_display(self, conn):
+    """Handle screen capture and transmission"""
+    try:
+        # Initial screen capture and send
+        ...
+    except Exception as e:
+        print(f"Display handling error: {e}")
+    finally:
+        conn.close()  # Ensure the connection is closed
