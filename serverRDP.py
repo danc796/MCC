@@ -20,28 +20,81 @@ class RDPServer:
         # Server setup
         self.host = (host, port)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # Add this line to allow socket reuse
         self.socket.bind(self.host)
         self.socket.listen(1)
+
+        # Set a timeout to make the server stoppable
+        self.socket.settimeout(1.0)
 
         # Image state
         self.last_image = None
         self.lock = threading.Lock()
-
         self.shift_pressed = False
 
-    def start(self):
-        """Start the RDP server and listen for connections"""
-        print(f"Server started on {self.host[0]}:{self.host[1]}")
-        while True:
-            conn, addr = self.socket.accept()
-            print(f"New connection from {addr}")
+        # Control flags
+        self.running = True
+        self.active_connections = []
+        self.threads = []
 
-            # Start display and input threads for the client
-            threading.Thread(target=self.handle_display, args=(conn,)).start()
-            threading.Thread(target=self.handle_input, args=(conn,)).start()
+    def start(self):
+        """Start the RDP server and listen for connections with improved error handling"""
+        print(f"Server started on {self.host[0]}:{self.host[1]}")
+
+        while self.running:
+            try:
+                conn, addr = self.socket.accept()
+                print(f"New connection from {addr}")
+
+                # Store connection reference
+                self.active_connections.append(conn)
+
+                # Start display and input threads for the client
+                display_thread = threading.Thread(target=self.handle_display, args=(conn,))
+                input_thread = threading.Thread(target=self.handle_input, args=(conn,))
+
+                display_thread.daemon = True
+                input_thread.daemon = True
+
+                self.threads.append(display_thread)
+                self.threads.append(input_thread)
+
+                display_thread.start()
+                input_thread.start()
+
+            except socket.timeout:
+                # This is normal - allows checking the running flag
+                continue
+            except Exception as e:
+                if self.running:  # Only log if we weren't intentionally stopped
+                    print(f"RDP server connection error: {e}")
+                break
+
+    def stop(self):
+        """Stop the RDP server and clean up connections"""
+        print("Stopping RDP server...")
+        self.running = False
+
+        # Close all active connections
+        for conn in self.active_connections:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+                conn.close()
+            except:
+                pass
+
+        self.active_connections = []
+
+        # Close main socket
+        try:
+            self.socket.close()
+        except:
+            pass
+
+        print("RDP server stopped")
 
     def handle_display(self, conn):
-        """Handle screen capture and transmission"""
+        """Handle screen capture and transmission with improved error handling"""
         try:
             # Initial screen capture and send
             initial_image = np.array(ImageGrab.grab())
@@ -57,50 +110,74 @@ class RDPServer:
             self.last_image = initial_image
 
             # Continuous screen update loop
-            while True:
+            while self.running and conn in self.active_connections:
                 time.sleep(self.REFRESH_RATE)
 
                 # Capture new screen
-                screen = np.array(ImageGrab.grab())
-                screen = cv2.cvtColor(screen, cv2.COLOR_RGB2BGR)
+                try:
+                    screen = np.array(ImageGrab.grab())
+                    screen = cv2.cvtColor(screen, cv2.COLOR_RGB2BGR)
 
-                # Check for changes
-                if np.array_equal(screen, self.last_image):
+                    # Check for changes
+                    if np.array_equal(screen, self.last_image):
+                        continue
+
+                    # Encode and send new frame
+                    _, frame_data = cv2.imencode('.jpg', screen,
+                                                 [cv2.IMWRITE_JPEG_QUALITY, self.IMAGE_QUALITY])
+
+                    header = struct.pack(">BI", 1, len(frame_data))
+                    conn.sendall(header)
+                    conn.sendall(frame_data)
+
+                    self.last_image = screen
+                except:
+                    # Handle screen capture errors - just continue to next frame
                     continue
-
-                # Encode and send new frame
-                _, frame_data = cv2.imencode('.jpg', screen,
-                                             [cv2.IMWRITE_JPEG_QUALITY, self.IMAGE_QUALITY])
-
-                header = struct.pack(">BI", 1, len(frame_data))
-                conn.sendall(header)
-                conn.sendall(frame_data)
-
-                self.last_image = screen
 
         except Exception as e:
             print(f"Display handling error: {e}")
-            conn.close()
+        finally:
+            # Clean up the connection if it's still in our list
+            if conn in self.active_connections:
+                try:
+                    conn.close()
+                    self.active_connections.remove(conn)
+                except:
+                    pass
 
     def handle_input(self, conn):
-        """Handle input events from client"""
+        """Handle input events from client with improved error handling"""
         try:
             # Get client platform info
             platform = conn.recv(3)
             print(f"Client platform: {platform.decode()}")
 
             # Input event loop
-            while True:
-                event_data = conn.recv(6)
-                if not event_data or len(event_data) != 6:
-                    break
+            while self.running and conn in self.active_connections:
+                try:
+                    event_data = conn.recv(6)
+                    if not event_data or len(event_data) != 6:
+                        break
 
-                key, action, x, y = struct.unpack('>BBHH', event_data)
-                self.process_input(key, action, x, y)
+                    key, action, x, y = struct.unpack('>BBHH', event_data)
+                    self.process_input(key, action, x, y)
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    print(f"Input reception error: {e}")
+                    break
 
         except Exception as e:
             print(f"Input handling error: {e}")
-            conn.close()
+        finally:
+            # Clean up the connection if it's still in our list
+            if conn in self.active_connections:
+                try:
+                    conn.close()
+                    self.active_connections.remove(conn)
+                except:
+                    pass
 
     def process_input(self, key, action, x, y):
         """Process individual input events"""
