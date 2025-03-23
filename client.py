@@ -9,6 +9,7 @@ import time
 import logging
 from datetime import datetime
 import sys
+import os
 
 
 class ToastNotification:
@@ -87,6 +88,7 @@ class ToastNotification:
             self._show_next_notification()
 
 
+
 class MCCClient(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -98,6 +100,11 @@ class MCCClient(ctk.CTk):
 
         self.connections = {}
         self.active_connection = None
+
+        # Auto-reconnection settings
+        self.auto_reconnect = True
+        self.reconnect_attempts = 3
+        self.reconnect_delay = 5  # seconds
 
         self.title("Multi Computers Control")
         self.geometry("1200x800")
@@ -119,6 +126,27 @@ class MCCClient(ctk.CTk):
 
         self.initialize_monitoring()
 
+    def safe_set_progress(self, progress_bar, value):
+        """Safely set progress bar value with proper widget validation"""
+        if not progress_bar:
+            return False
+
+        try:
+            # First check if widget still exists
+            if not self.is_widget_valid(progress_bar):
+                return False
+
+            # Use a try block around the actual set operation
+            try:
+                progress_bar.set(value)
+                return True
+            except tk.TclError as e:
+                logging.warning(f"Error setting progress bar value: {str(e)}")
+                return False
+        except Exception as e:
+            logging.error(f"Unexpected error in safe_set_progress: {str(e)}")
+            return False
+
     def create_gui(self):
         """Create the main GUI with connection management"""
         # Create main container
@@ -138,6 +166,16 @@ class MCCClient(ctk.CTk):
 
         self.port_entry = ctk.CTkEntry(connection_frame, placeholder_text="Port (default: 5000)")
         self.port_entry.pack(fill=tk.X, padx=5, pady=2)
+
+        # Add auto-reconnect checkbox
+        self.auto_reconnect_var = tk.BooleanVar(value=True)
+        reconnect_check = ctk.CTkCheckBox(
+            connection_frame,
+            text="Auto-reconnect",
+            variable=self.auto_reconnect_var,
+            command=self._toggle_auto_reconnect
+        )
+        reconnect_check.pack(fill=tk.X, padx=5, pady=2)
 
         btn_frame = ctk.CTkFrame(connection_frame)
         btn_frame.pack(fill=tk.X, padx=5, pady=2)
@@ -160,6 +198,12 @@ class MCCClient(ctk.CTk):
         self.create_software_tab()
         self.create_power_tab()
         self.create_remote_desktop_tab()
+
+    def _toggle_auto_reconnect(self):
+        """Toggle auto-reconnect feature"""
+        self.auto_reconnect = self.auto_reconnect_var.get()
+        state = "enabled" if self.auto_reconnect else "disabled"
+        logging.info(f"Auto-reconnect {state}")
 
     def create_monitoring_tab(self):
         """Create the monitoring tab with improved widget management"""
@@ -462,7 +506,7 @@ class MCCClient(ctk.CTk):
         stats_frame.pack(fill=tk.X, padx=5, pady=5)
 
     def add_connection(self):
-        """Add a new remote connection"""
+        """Add a new remote connection with auto-reconnect support"""
         host = self.host_entry.get()
         port = self.port_entry.get()
 
@@ -476,6 +520,38 @@ class MCCClient(ctk.CTk):
             messagebox.showwarning("Input Error", "Invalid port number")
             return
 
+        connection_id = f"{host}:{port}"
+
+        # Store connection info first (even before successful connection)
+        self.connections[connection_id] = {
+            'socket': None,
+            'cipher_suite': None,
+            'host': host,
+            'port': port,
+            'system_info': None,
+            'connection_active': False,
+            'reconnect_thread': None
+        }
+
+        # Add to computer list with 'Connecting' status
+        self.computer_list.insert('', 'end', connection_id, text=host, values=('Connecting...',))
+
+        # Attempt initial connection
+        self._connect_to_server(connection_id)
+
+        # Clear input fields
+        self.host_entry.delete(0, tk.END)
+        self.port_entry.delete(0, tk.END)
+
+    def _connect_to_server(self, connection_id):
+        """Connect to a server with given connection ID"""
+        if connection_id not in self.connections:
+            logging.error(f"Connection ID {connection_id} not found")
+            return False
+
+        conn_info = self.connections[connection_id]
+        host, port = conn_info['host'], conn_info['port']
+
         try:
             # Create new connection
             new_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -486,33 +562,103 @@ class MCCClient(ctk.CTk):
             encryption_key = new_socket.recv(1024)
             cipher_suite = Fernet(encryption_key)
 
-            # Store connection info
-            connection_id = f"{host}:{port}"
-            self.connections[connection_id] = {
-                'socket': new_socket,
-                'cipher_suite': cipher_suite,
-                'host': host,
-                'port': port,
-                'system_info': None
-            }
+            # Update connection info
+            conn_info['socket'] = new_socket
+            conn_info['cipher_suite'] = cipher_suite
+            conn_info['connection_active'] = True
+
+            # Update status in UI
+            self.computer_list.set(connection_id, "status", "Connected")
 
             # Start monitoring thread for this connection
-            thread = threading.Thread(
+            monitor_thread = threading.Thread(
                 target=self.monitor_connection,
                 args=(connection_id,),
                 daemon=True
             )
-            thread.start()
+            monitor_thread.start()
 
-            # Add to computer list
-            self.computer_list.insert('', 'end', connection_id, text=host, values=('Connected',))
+            # Display success notification
+            self.toast.show_toast(f"Connected to {host}:{port}", "success")
 
-            # Clear input fields
-            self.host_entry.delete(0, tk.END)
-            self.port_entry.delete(0, tk.END)
+            logging.info(f"Successfully connected to {host}:{port}")
+            return True
 
         except Exception as e:
-            messagebox.showerror("Connection Error", f"Failed to connect: {str(e)}")
+            # Update status in UI
+            self.computer_list.set(connection_id, "status", "Failed")
+
+            error_msg = f"Failed to connect to {host}:{port}: {str(e)}"
+            logging.error(error_msg)
+
+            # Don't show error if auto-reconnect is enabled
+            if not self.auto_reconnect:
+                self.toast.show_toast(error_msg, "error")
+
+            # Start reconnection attempt if auto-reconnect is enabled
+            if self.auto_reconnect:
+                self._start_reconnection_thread(connection_id)
+
+            return False
+
+    def _start_reconnection_thread(self, connection_id):
+        """Start a background thread to handle reconnection attempts"""
+        if connection_id not in self.connections:
+            return
+
+        # Check if reconnection thread is already running
+        if self.connections[connection_id].get('reconnect_thread') and self.connections[connection_id][
+            'reconnect_thread'].is_alive():
+            return
+
+        # Create and start new reconnection thread
+        reconnect_thread = threading.Thread(
+            target=self._attempt_reconnect,
+            args=(connection_id,),
+            daemon=True
+        )
+        reconnect_thread.start()
+
+        # Store thread reference
+        self.connections[connection_id]['reconnect_thread'] = reconnect_thread
+
+    def _attempt_reconnect(self, connection_id):
+        """Thread function to attempt reconnection multiple times"""
+        if not self.auto_reconnect or connection_id not in self.connections:
+            return
+
+        conn_info = self.connections[connection_id]
+        host, port = conn_info['host'], conn_info['port']
+
+        attempt = 0
+        max_attempts = 10  # Maximum number of reconnection attempts
+
+        while self.running and self.auto_reconnect and attempt < max_attempts:
+            if connection_id not in self.connections:
+                # Connection was removed, stop reconnection attempts
+                break
+
+            # Skip if already connected
+            if conn_info.get('connection_active', False):
+                break
+
+            attempt += 1
+
+            # Update status in UI
+            self.computer_list.set(connection_id, "status", f"Reconnecting ({attempt})...")
+
+            # Attempt reconnection
+            if self._connect_to_server(connection_id):
+                # Successfully reconnected
+                break
+
+            # Wait before next attempt (with increasing backoff)
+            backoff_time = min(30, self.reconnect_delay * attempt)  # Max 30 seconds
+            time.sleep(backoff_time)
+
+        # If we exited the loop without success
+        if connection_id in self.connections and not self.connections[connection_id].get('connection_active', False):
+            self.computer_list.set(connection_id, "status", "Disconnected")
 
     def remove_connection(self):
         """Remove selected connection"""
@@ -543,34 +689,51 @@ class MCCClient(ctk.CTk):
             self.active_connection = None
 
     def monitor_connection(self, connection_id):
-        """Monitor individual connection"""
-        connection = self.connections.get(connection_id)
-        if not connection:
+        """Monitor individual connection with automatic reconnection"""
+        if connection_id not in self.connections:
             return
 
-        while connection_id in self.connections:
+        conn_info = self.connections[connection_id]
+
+        while self.running and connection_id in self.connections:
             try:
                 # Get system info
                 response = self.send_command(connection_id, 'system_info', {})
                 if response and response.get('status') == 'success':
                     self.connections[connection_id]['system_info'] = response['data']
-
-                # Update status in computer list
-                self.computer_list.set(connection_id, "status", "Connected")
+                    self.connections[connection_id]['connection_active'] = True
+                    self.computer_list.set(connection_id, "status", "Connected")
+                else:
+                    raise Exception("Failed to get system info")
 
             except Exception as e:
-                print(f"Monitoring error for {connection_id}: {str(e)}")
+                logging.error(f"Monitoring error for {connection_id}: {str(e)}")
                 self.computer_list.set(connection_id, "status", "Error")
+                self.connections[connection_id]['connection_active'] = False
+
+                # Attempt reconnection if auto-reconnect is enabled
+                if self.auto_reconnect:
+                    self._start_reconnection_thread(connection_id)
                 break
 
             time.sleep(5)  # Check every 5 seconds
 
     def send_command(self, connection_id, command_type, data):
-        """Send command with improved large data handling"""
+        """Send command with improved error handling and reconnection"""
         connection = self.connections.get(connection_id)
         if not connection:
-            print(f"No connection found for ID: {connection_id}")
+            logging.error(f"No connection found for ID: {connection_id}")
             return None
+
+        # Check if connection is active
+        if not connection.get('connection_active', False) or not connection.get('socket'):
+            # Try to reconnect if auto-reconnect is enabled
+            if self.auto_reconnect:
+                logging.info(f"Connection {connection_id} is not active, attempting to reconnect")
+                if not self._connect_to_server(connection_id):
+                    return None  # Reconnection failed
+            else:
+                return None  # No auto-reconnect, just fail
 
         try:
             # Prepare command
@@ -578,144 +741,199 @@ class MCCClient(ctk.CTk):
                 'type': command_type,
                 'data': data
             }
-            print(f"Sending command: {command_type}")
 
-            # Convert to JSON and check size
+            # Convert to JSON
             json_data = json.dumps(command)
 
-            # Regular command sending
+            # Send command
             encrypted_data = connection['cipher_suite'].encrypt(json_data.encode())
             connection['socket'].send(encrypted_data)
-            print("Command sent successfully")
 
             # Receive response
-            print("Waiting for response...")
             encrypted_response = connection['socket'].recv(16384)
             if not encrypted_response:
-                print("Received empty response from server")
-                return None
-            print(f"Received encrypted response of length: {len(encrypted_response)}")
+                raise ConnectionError("Received empty response from server")
 
             # Decrypt response
             try:
                 decrypted_response = connection['cipher_suite'].decrypt(encrypted_response).decode()
-                print("Response decrypted successfully")
                 return json.loads(decrypted_response)
             except Exception as e:
-                print(f"Decryption error: {str(e)}")
-                return None
+                logging.error(f"Decryption error: {str(e)}")
+                raise
 
         except Exception as e:
-            print(f"Send command error: {str(e)}")
+            logging.error(f"Send command error: {str(e)}")
+
+            # Mark connection as inactive
+            connection['connection_active'] = False
+            self.computer_list.set(connection_id, "status", "Error")
+
+            # Start reconnection thread if auto-reconnect is enabled
+            if self.auto_reconnect:
+                self._start_reconnection_thread(connection_id)
+
             return None
 
     def update_hardware_info(self, data):
-        """Update hardware monitoring displays with widget validation"""
+        """Update hardware monitoring displays with enhanced progress bar safety"""
         if not self.monitoring_active:
             return
 
         try:
-            # Update CPU usage with validation
-            if 'cpu' in self.progress_bars and self.progress_bars['cpu'].winfo_exists():
-                cpu_percent = data.get('cpu_percent', 0)
-                if isinstance(cpu_percent, (int, float)) and 0 <= cpu_percent <= 100:
-                    self.progress_bars['cpu'].set(cpu_percent / 100.0)
-                    if hasattr(self, 'cpu_label') and self.cpu_label.winfo_exists():
-                        self.cpu_label.configure(text=f"{cpu_percent:.1f}%")
+            # Update CPU usage with improved validation
+            cpu_percent = data.get('cpu_percent', 0)
+            if isinstance(cpu_percent, (int, float)) and 0 <= cpu_percent <= 100:
+                # CPU progress bar
+                if 'cpu' in self.progress_bars:
+                    # Use safe_set_progress and remove reference if it fails
+                    if not self.safe_set_progress(self.progress_bars['cpu'], cpu_percent / 100.0):
+                        self.progress_bars.pop('cpu', None)
 
-            # Update memory usage with validation
-            if 'mem' in self.progress_bars and self.progress_bars['mem'].winfo_exists():
-                memory_data = data.get('memory_usage', {})
-                if isinstance(memory_data, dict):
-                    memory_percent = memory_data.get('percent', 0)
-                    if isinstance(memory_percent, (int, float)) and 0 <= memory_percent <= 100:
-                        self.progress_bars['mem'].set(memory_percent / 100.0)
-                        if hasattr(self, 'mem_label') and self.mem_label.winfo_exists():
-                            self.mem_label.configure(text=f"{memory_percent:.1f}%")
+                    # CPU label
+                    if hasattr(self, 'cpu_label'):
+                        self.safe_widget_update(self.cpu_label, text=f"{cpu_percent:.1f}%")
 
-            # Only update disk info if we're on the monitoring tab
-            if self.monitoring_active and hasattr(self, 'disk_frame') and self.disk_frame.winfo_exists():
-                # Clear existing disk information
-                for widget in self.disk_frame.winfo_children():
-                    widget.destroy()
+            # Update memory usage with improved validation
+            memory_data = data.get('memory_usage', {})
+            if isinstance(memory_data, dict):
+                memory_percent = memory_data.get('percent', 0)
+                if isinstance(memory_percent, (int, float)) and 0 <= memory_percent <= 100:
+                    # Memory progress bar
+                    if 'mem' in self.progress_bars:
+                        # Use safe_set_progress and remove reference if it fails
+                        if not self.safe_set_progress(self.progress_bars['mem'], memory_percent / 100.0):
+                            self.progress_bars.pop('mem', None)
 
-                # Update disk usage
-                self.update_disk_info(data.get('disk_usage', {}))
+                        # Memory label
+                        if hasattr(self, 'mem_label'):
+                            self.safe_widget_update(self.mem_label, text=f"{memory_percent:.1f}%")
+
+            # Only update disk info if we're on the monitoring tab with proper widget validation
+            if self.monitoring_active and hasattr(self, 'disk_frame'):
+                if self.is_widget_valid(self.disk_frame):
+                    # Safely clear existing disk information
+                    self.safe_clear_children(self.disk_frame)
+
+                    # Update disk usage
+                    self.update_disk_info(data.get('disk_usage', {}))
 
         except Exception as e:
-            print(f"Error updating hardware info: {str(e)}")
+            logging.error(f"Error updating hardware info: {str(e)}")
 
     def update_disk_info(self, disk_usage):
-        """Separate method for updating disk information"""
+        """Update disk information with proper display"""
         try:
             if not isinstance(disk_usage, dict) or not self.monitoring_active:
                 return
 
-            # Create header
-            header_frame = ctk.CTkFrame(self.disk_frame)
-            header_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+            # First check if the disk_frame is still valid
+            if not self.is_widget_valid(self.disk_frame):
+                return
 
-            headers = ["Drive", "Capacity", "Used Space", "Free Space", "Usage"]
-            widths = [100, 150, 150, 150, 100]
+            # Safely clear existing widgets, but keep track of them
+            disk_frames = {}
+            header_frame = None
 
-            for header, width in zip(headers, widths):
-                ctk.CTkLabel(header_frame, text=header, width=width).pack(side=tk.LEFT, padx=5)
+            # First, find if we already have widgets and store references
+            for child in self.disk_frame.winfo_children():
+                # Store references without modifying the widgets
+                if len(child.winfo_children()) > 0:
+                    first_child = child.winfo_children()[0]
+                    if isinstance(first_child, ctk.CTkLabel):
+                        # This is likely a header if it's the first child with multiple labels
+                        if len(child.winfo_children()) >= 5:  # Assuming 5 columns in header
+                            header_frame = child
+                        # For disk frame, check if the first child has disk letter text
+                        elif first_child.cget('text') in disk_usage:
+                            disk_frames[first_child.cget('text')] = child
 
+            # Clear all children if we're going to rebuild
+            if not header_frame or len(disk_frames) != len(disk_usage):
+                self.safe_clear_children(self.disk_frame)
+                header_frame = None
+                disk_frames = {}
+
+            # Create header if needed
+            if not header_frame:
+                try:
+                    header_frame = ctk.CTkFrame(self.disk_frame)
+                    header_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+
+                    headers = ["Drive", "Capacity", "Used Space", "Free Space", "Usage"]
+                    widths = [100, 150, 150, 150, 100]
+
+                    for header, width in zip(headers, widths):
+                        ctk.CTkLabel(header_frame, text=header, width=width).pack(side=tk.LEFT, padx=5)
+                except tk.TclError as e:
+                    logging.error(f"Error creating disk header: {str(e)}")
+                    return
+
+            # Process each disk mount
             for mount, usage in disk_usage.items():
                 if not isinstance(usage, dict):
                     continue
 
-                try:
-                    disk_frame = ctk.CTkFrame(self.disk_frame)
-                    disk_frame.pack(fill=tk.X, padx=5, pady=2)
+                # Verify disk frame is still valid
+                if not self.is_widget_valid(self.disk_frame):
+                    return
 
-                    total = usage.get('total', 0)
-                    used = usage.get('used', 0)
-                    percent = usage.get('percent', 0)
+                # Create new disk frame if needed
+                if str(mount) not in disk_frames:
+                    try:
+                        disk_frame = ctk.CTkFrame(self.disk_frame)
+                        disk_frame.pack(fill=tk.X, padx=5, pady=2)
 
-                    if not all(isinstance(x, (int, float)) for x in [total, used, percent]):
+                        total = usage.get('total', 0)
+                        used = usage.get('used', 0)
+                        percent = usage.get('percent', 0)
+
+                        if not all(isinstance(x, (int, float)) for x in [total, used, percent]):
+                            continue
+
+                        # Drive letter/name
+                        ctk.CTkLabel(disk_frame, text=str(mount), width=100).pack(side=tk.LEFT, padx=5)
+
+                        # Total capacity
+                        total_gb = total / (1024 ** 3)
+                        ctk.CTkLabel(disk_frame, text=f"{total_gb:.1f} GB", width=150).pack(side=tk.LEFT, padx=5)
+
+                        # Used space
+                        used_gb = used / (1024 ** 3)
+                        ctk.CTkLabel(disk_frame, text=f"{used_gb:.1f} GB", width=150).pack(side=tk.LEFT, padx=5)
+
+                        # Free space
+                        free_gb = (total - used) / (1024 ** 3)
+                        ctk.CTkLabel(disk_frame, text=f"{free_gb:.1f} GB", width=150).pack(side=tk.LEFT, padx=5)
+
+                        # Usage percentage
+                        percent_frame = ctk.CTkFrame(disk_frame)
+                        percent_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+                        if self.monitoring_active and self.is_widget_valid(percent_frame):
+                            try:
+                                progress = ctk.CTkProgressBar(percent_frame)
+                                progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+                                self.safe_set_progress(progress, percent / 100.0)
+
+                                # Color based on usage
+                                if percent >= 90:
+                                    progress.configure(progress_color="red")
+                                elif percent >= 75:
+                                    progress.configure(progress_color="orange")
+                                else:
+                                    progress.configure(progress_color="green")
+
+                                ctk.CTkLabel(percent_frame, text=f"{percent:.1f}%", width=50).pack(side=tk.LEFT, padx=5)
+                            except tk.TclError as e:
+                                logging.warning(f"Error creating progress bar for {mount}: {str(e)}")
+                                continue
+                    except Exception as disk_error:
+                        logging.error(f"Error displaying disk {mount}: {str(disk_error)}")
                         continue
 
-                    # Drive letter/name
-                    ctk.CTkLabel(disk_frame, text=str(mount), width=100).pack(side=tk.LEFT, padx=5)
-
-                    # Total capacity
-                    total_gb = total / (1024 ** 3)
-                    ctk.CTkLabel(disk_frame, text=f"{total_gb:.1f} GB", width=150).pack(side=tk.LEFT, padx=5)
-
-                    # Used space
-                    used_gb = used / (1024 ** 3)
-                    ctk.CTkLabel(disk_frame, text=f"{used_gb:.1f} GB", width=150).pack(side=tk.LEFT, padx=5)
-
-                    # Free space
-                    free_gb = (total - used) / (1024 ** 3)
-                    ctk.CTkLabel(disk_frame, text=f"{free_gb:.1f} GB", width=150).pack(side=tk.LEFT, padx=5)
-
-                    # Usage percentage
-                    percent_frame = ctk.CTkFrame(disk_frame)
-                    percent_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-
-                    if self.monitoring_active and self.disk_frame.winfo_exists():
-                        progress = ctk.CTkProgressBar(percent_frame)
-                        progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-                        progress.set(percent / 100.0)
-
-                        # Color based on usage
-                        if percent >= 90:
-                            progress.configure(progress_color="red")
-                        elif percent >= 75:
-                            progress.configure(progress_color="orange")
-                        else:
-                            progress.configure(progress_color="green")
-
-                        ctk.CTkLabel(percent_frame, text=f"{percent:.1f}%", width=50).pack(side=tk.LEFT, padx=5)
-
-                except Exception as disk_error:
-                    print(f"Error displaying disk {mount}: {str(disk_error)}")
-                    continue
-
         except Exception as e:
-            print(f"Error updating disk info: {str(e)}")
+            logging.error(f"Error updating disk info: {str(e)}")
 
     def update_software_status(self, message):
         """Update status message in software tab"""
@@ -1029,75 +1247,227 @@ class MCCClient(ctk.CTk):
         logging.info("Resource monitoring stopped")
 
     def start_rdp(self):
+        """Start remote desktop with better error handling and widget validation"""
+        # Verify active connection
         if not self.active_connection:
-            self.rdt_status.configure(text="Please select a computer first")
+            if self.is_widget_valid(self.rdt_status):
+                self.rdt_status.configure(text="Please select a computer first")
             return
 
-        # Get the scale value from the GUI
-        scale_value = self.scale_slider.get() / 100.0
+        # Check if the connection is active
+        if not self.connections.get(self.active_connection, {}).get('connection_active', False):
+            if self.is_widget_valid(self.rdt_status):
+                self.rdt_status.configure(text="Connection is not active. Please reconnect first.")
 
-        # Request RDP server start
-        response = self.send_command(self.active_connection, 'start_rdp', {'scale': scale_value})
+            # Try to reconnect if auto-reconnect is enabled
+            if self.auto_reconnect:
+                if self.is_widget_valid(self.rdt_status):
+                    self.rdt_status.configure(text="Attempting to reconnect...")
 
-        if response and response.get('status') == 'success':
-            ip, port = response['data']['ip'], response['data']['port']
+                if self._connect_to_server(self.active_connection):
+                    if self.is_widget_valid(self.rdt_status):
+                        self.rdt_status.configure(text="Reconnected. Starting remote desktop...")
+                else:
+                    if self.is_widget_valid(self.rdt_status):
+                        self.rdt_status.configure(text="Reconnection failed. Cannot start remote desktop.")
+                    return
+            else:
+                return
 
-            try:
-                # Start RDP client in a new process
-                import subprocess
-                rdp_process = subprocess.Popen([
-                    sys.executable,
-                    'clientRDP.py',
-                    '--host', ip,
-                    '--port', str(port),
-                    '--scale', str(scale_value)
-                ])
-
-                # Update status
-                self.rdt_status.configure(text="Remote desktop session active")
-
-                # Wait for RDP session to end
-                rdp_process.wait()
-
-                # Clean up RDP server
-                self.send_command(self.active_connection, 'stop_rdp', {})
-                self.rdt_status.configure(text="Remote desktop session ended")
-
-            except Exception as e:
-                self.rdt_status.configure(text=f"RDP Error: {str(e)}")
-                logging.error(f"RDP error: {str(e)}")
-        else:
-            self.rdt_status.configure(text="Failed to start remote desktop")
-
-    def on_tab_change(self, event):
-        """Handle tab changes with widget state management"""
         try:
-            current_tab = self.notebook.select()
-            prev_tab = self.active_tab
-            self.active_tab = self.notebook.tab(current_tab, "text")
+            # First, ensure any existing RDP session is properly closed
+            self.send_command(self.active_connection, 'stop_rdp', {})
+            time.sleep(1)  # Give server time to clean up
 
-            print(f"Tab changed from {prev_tab} to {self.active_tab}")
+            # Get the scale value from the GUI with validation
+            scale_value = 1.0
+            if self.is_widget_valid(self.scale_slider):
+                scale_value = self.scale_slider.get() / 100.0
 
-            # Handle monitoring tab exit
-            if prev_tab == "Monitoring":
-                self.monitoring_active = False
-                # Clear progress bars dict
-                self.progress_bars.clear()
+            # Request RDP server start with timeout and error handling
+            try:
+                if self.is_widget_valid(self.rdt_status):
+                    self.rdt_status.configure(text="Starting remote desktop...")
 
-            # Handle monitoring tab entry
-            if self.active_tab == "Monitoring":
-                self.monitoring_active = True
-                # Store progress bar references
-                if hasattr(self, 'cpu_progress'):
-                    self.progress_bars['cpu'] = self.cpu_progress
-                if hasattr(self, 'mem_progress'):
-                    self.progress_bars['mem'] = self.mem_progress
+                response = self.send_command(self.active_connection, 'start_rdp', {'scale': scale_value})
+            except Exception as e:
+                logging.error(f"Error sending start_rdp command: {str(e)}")
+                if self.is_widget_valid(self.rdt_status):
+                    self.rdt_status.configure(text=f"Failed to start RDP: {str(e)}")
+                return
 
-            # Update the UI based on the new tab
-            self.update_idletasks()
+            if response and response.get('status') == 'success':
+                ip, port = response['data']['ip'], response['data']['port']
+
+                try:
+                    # Start RDP client in a new process with error handling
+                    import subprocess
+
+                    # Make sure client RDP path is correct
+                    rdp_client_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'clientRDP.py')
+                    if not os.path.exists(rdp_client_path):
+                        rdp_client_path = 'clientRDP.py'  # Fallback to current directory
+
+                    rdp_process = subprocess.Popen([
+                        sys.executable,
+                        rdp_client_path,
+                        '--host', ip,
+                        '--port', str(port),
+                        '--scale', str(scale_value)
+                    ])
+
+                    # Update status safely
+                    if self.is_widget_valid(self.rdt_status):
+                        self.rdt_status.configure(text="Remote desktop session active")
+
+                    # Start a monitoring thread for the RDP process
+                    rdp_monitor = threading.Thread(
+                        target=self.monitor_rdp_session,
+                        args=(rdp_process, self.active_connection),
+                        daemon=True
+                    )
+                    rdp_monitor.start()
+
+                except Exception as e:
+                    if self.is_widget_valid(self.rdt_status):
+                        self.rdt_status.configure(text=f"RDP Error: {str(e)}")
+                    logging.error(f"RDP error: {str(e)}")
+            else:
+                error_msg = "Failed to start remote desktop"
+                if response and response.get('message'):
+                    error_msg += f": {response.get('message')}"
+
+                if self.is_widget_valid(self.rdt_status):
+                    self.rdt_status.configure(text=error_msg)
+                logging.error(error_msg)
 
         except Exception as e:
-            print(f"Error during tab change: {str(e)}")
+            logging.error(f"Unexpected error in start_rdp: {str(e)}")
+            if self.is_widget_valid(self.rdt_status):
+                self.rdt_status.configure(text=f"Error: {str(e)}")
+
+    def monitor_rdp_session(self, rdp_process, connection_id):
+        """Monitor RDP session and clean up when finished with enhanced safety"""
+        try:
+            # Wait for RDP process to finish
+            rdp_process.wait()
+
+            # Check if the connection is still valid before trying to stop RDP
+            if connection_id in self.connections and self.connections[connection_id].get('connection_active', False):
+                try:
+                    # Clean up RDP server
+                    self.send_command(connection_id, 'stop_rdp', {})
+                except Exception as e:
+                    logging.error(f"Error stopping RDP server: {str(e)}")
+
+            # Update status (safely with tkinter)
+            if hasattr(self, 'rdt_status') and self.is_widget_valid(self.rdt_status):
+                tk.Misc.after(self, 0, lambda: self.rdt_status.configure(text="Remote desktop session ended"))
+
+        except Exception as e:
+            logging.error(f"RDP monitoring error: {str(e)}")
+            if hasattr(self, 'rdt_status') and self.is_widget_valid(self.rdt_status):
+                tk.Misc.after(self, 0, lambda: self.rdt_status.configure(text=f"RDP Error: {str(e)}"))
+
+    def on_tab_change(self, event):
+        """Enhanced tab change handler with immediate progress bar cleanup"""
+        try:
+            # Get current tab information safely
+            try:
+                current_tab = self.notebook.select()
+                if not current_tab:
+                    return
+
+                prev_tab = self.active_tab
+                self.active_tab = self.notebook.tab(current_tab, "text")
+
+                logging.info(f"Tab changed from {prev_tab} to {self.active_tab}")
+            except Exception as e:
+                logging.error(f"Error getting tab information: {str(e)}")
+                return
+
+            # Extra safety for monitoring exit - IMMEDIATELY clear progress references
+            if prev_tab == "Monitoring":
+                # First set monitoring inactive to prevent updates
+                self.monitoring_active = False
+
+                # Immediately clear progress bar references to prevent access to destroyed widgets
+                if hasattr(self, 'progress_bars'):
+                    self.progress_bars.clear()
+
+            # Handle monitoring tab entry - with safety checks
+            if self.active_tab == "Monitoring":
+                # Initialize empty progress bar dictionary
+                self.progress_bars = {}
+
+                # Delay before adding progress bars to ensure they are created
+                tk.Misc.after(self, 100, self._setup_monitoring_widgets)
+
+            # Safe update of the UI
+            try:
+                self.update_idletasks()
+            except Exception as e:
+                logging.error(f"Error updating UI after tab change: {str(e)}")
+
+        except Exception as e:
+            logging.error(f"Unhandled error during tab change: {str(e)}")
+
+    def is_widget_valid(self, widget):
+        """Safely check if a widget exists and is valid"""
+        if widget is None:
+            return False
+
+        try:
+            return widget.winfo_exists()
+        except (tk.TclError, AttributeError):
+            return False
+
+    def _setup_monitoring_widgets(self):
+        """Set up monitoring widgets with delay to ensure they exist"""
+        try:
+            # Now set monitoring_active flag
+            self.monitoring_active = True
+
+            # Store progress bar references after a short delay
+            if hasattr(self, 'cpu_progress') and self.is_widget_valid(self.cpu_progress):
+                self.progress_bars['cpu'] = self.cpu_progress
+
+            if hasattr(self, 'mem_progress') and self.is_widget_valid(self.mem_progress):
+                self.progress_bars['mem'] = self.mem_progress
+
+            # Trigger an initial refresh
+            if self.active_connection:
+                self.refresh_monitoring()
+        except Exception as e:
+            logging.error(f"Error setting up monitoring widgets: {str(e)}")
+
+    def safe_widget_update(self, widget, **kwargs):
+        """Safely update a widget's properties with error handling"""
+        if not self.is_widget_valid(widget):
+            return False
+
+        try:
+            widget.configure(**kwargs)
+            return True
+        except (tk.TclError, AttributeError) as e:
+            logging.error(f"Error updating widget: {str(e)}")
+            return False
+
+    def safe_clear_children(self, parent_widget):
+        """Safely clear all children of a widget"""
+        if not self.is_widget_valid(parent_widget):
+            return False
+
+        try:
+            for widget in parent_widget.winfo_children():
+                try:
+                    widget.destroy()
+                except tk.TclError:
+                    pass
+            return True
+        except (tk.TclError, AttributeError) as e:
+            logging.error(f"Error clearing widget children: {str(e)}")
+            return False
 
     def on_closing(self):
         """Handle window closing event"""
