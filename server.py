@@ -345,51 +345,88 @@ class MCCServer:
         }
 
     def handle_start_rdp(self, data):
+        """Start RDP server with improved state management"""
         try:
+            # Force close any existing RDP server
+            if self.rdp_server is not None:
+                try:
+                    logging.info("Stopping existing RDP server before starting a new one")
+                    self.rdp_server.stop()
+                    self.rdp_server = None
+
+                    # If there's a thread, wait for it to terminate
+                    if self.rdp_thread and self.rdp_thread.is_alive():
+                        self.rdp_thread.join(timeout=2)
+                        self.rdp_thread = None
+
+                    # Additional sleep to ensure resources are released
+                    time.sleep(1)
+                except Exception as e:
+                    logging.error(f"Error stopping existing RDP server: {str(e)}")
+
             # Use the actual server's IP for the RDP connection
             rdp_host = socket.gethostbyname(socket.gethostname())
             rdp_port = 5900  # Default RDP port
 
+            # Get scale parameter from client (if provided)
+            scale = data.get('scale', 1.0)
+
             # Create and start RDP server
-            if self.rdp_server is None:
-                self.rdp_server = RDPServer(host='0.0.0.0', port=rdp_port)
-                self.rdp_thread = threading.Thread(target=self.rdp_server.start)
-                self.rdp_thread.daemon = True
-                self.rdp_thread.start()
+            self.rdp_server = RDPServer(host='0.0.0.0', port=rdp_port)
+            self.rdp_thread = threading.Thread(target=self.rdp_server.start)
+            self.rdp_thread.daemon = True
+            self.rdp_thread.start()
 
-                # Wait for server to start
-                time.sleep(1)
+            # Wait for server to start
+            time.sleep(1.5)  # Increased wait time for server startup
 
-                return {
-                    'status': 'success',
-                    'data': {
-                        'ip': rdp_host,
-                        'port': rdp_port
-                    }
+            return {
+                'status': 'success',
+                'data': {
+                    'ip': rdp_host,
+                    'port': rdp_port,
+                    'scale': scale
                 }
-            else:
-                return {
-                    'status': 'error',
-                    'message': 'RDP server is already running'
-                }
+            }
 
         except Exception as e:
             logging.error(f"Failed to start RDP server: {str(e)}")
+            # Clean up in case of error
+            if hasattr(self, 'rdp_server') and self.rdp_server:
+                try:
+                    self.rdp_server.stop()
+                    self.rdp_server = None
+                except:
+                    pass
             return {
                 'status': 'error',
                 'message': str(e)
             }
 
     def handle_stop_rdp(self, data):
-        if self.rdp_server:
-            self.rdp_server.stop()
+        """Stop RDP server with improved cleanup"""
+        try:
+            if self.rdp_server:
+                logging.info("Stopping RDP server")
+                self.rdp_server.stop()
+                self.rdp_server = None
+
+                # Clean up thread reference
+                if self.rdp_thread:
+                    if self.rdp_thread.is_alive():
+                        self.rdp_thread.join(timeout=3)
+                    self.rdp_thread = None
+
+                return {'status': 'success', 'message': 'RDP server stopped successfully'}
+            else:
+                return {'status': 'success', 'message': 'No RDP server was running'}
+
+        except Exception as e:
+            logging.error(f"Error stopping RDP server: {str(e)}")
+            # Force reset server state even if there's an error
             self.rdp_server = None
-
-        if self.rdp_thread:
-            self.rdp_thread.join(timeout=5)
             self.rdp_thread = None
-
-        return {'status': 'success'}
+            return {'status': 'error', 'message': f'Error stopping RDP server: {str(e)}'}
 
     def stop(self):
         logging.info("Shutting down server...")
