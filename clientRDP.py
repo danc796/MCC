@@ -79,6 +79,8 @@ class RDPClient:
         try:
             host, port = self.host_var.get().split(':')
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # Set a connection timeout to prevent long freezes
+            self.socket.settimeout(3.0)  # 3-second timeout
             self.socket.connect((host, int(port)))
             self._create_display_window()
 
@@ -270,6 +272,10 @@ class RDPClient:
         if self.display_window:
             self.display_window.destroy()
             self.display_window = None
+
+        # Ensure that the display thread is also cleaned up
+        if self.display_thread and self.display_thread.is_alive():
+            self.display_thread.join(timeout=1.0)
 
     def toggle_connection(self):
         """Toggle connection state"""
