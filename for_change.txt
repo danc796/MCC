@@ -1,70 +1,54 @@
-clientRDP:
-def _cleanup(self):
-    """Enhanced cleanup with keyboard handling"""
-    self.keyboard_active = False
-    if self.keyboard_thread:
-        self.keyboard_thread.join(timeout=1.0)
-
-    if self.socket:
-        self.socket.close()
-        self.socket = None
-
-    if self.display_window:
-        self.display_window.destroy()
-        self.display_window = None
-
-    # Ensure that the display thread is also cleaned up
-    if self.display_thread and self.display_thread.is_alive():
-        self.display_thread.join(timeout=1.0)
-cleint:
-def start_rdp(self):
-    if not self.active_connection:
-        self.rdt_status.configure(text="Please select a computer first")
-        return
-
-    # Get the scale value from the GUI
-    scale_value = self.scale_slider.get() / 100.0
-
-    # Request RDP server start
-    response = self.send_command(self.active_connection, 'start_rdp', {'scale': scale_value})
-
-    if response and response.get('status') == 'success':
-        ip, port = response['data']['ip'], response['data']['port']
-
-        try:
-            # Start RDP client in a new process
-            import subprocess
-            rdp_process = subprocess.Popen([
-                sys.executable,
-                'clientRDP.py',
-                '--host', ip,
-                '--port', str(port),
-                '--scale', str(scale_value)
-            ])
-
-            # Update status
-            self.rdt_status.configure(text="Remote desktop session active")
-
-            # Wait for RDP session to end
-            rdp_process.wait()
-
-            # Clean up RDP server
-            self.send_command(self.active_connection, 'stop_rdp', {})
-            self.rdt_status.configure(text="Remote desktop session ended")
-
-        except Exception as e:
-            self.rdt_status.configure(text=f"RDP Error: {str(e)}")
-            logging.error(f"RDP error: {str(e)}")
-    else:
-        self.rdt_status.configure(text="Failed to start remote desktop")
-
-serverRDP:
-def handle_display(self, conn):
-    """Handle screen capture and transmission"""
+def handle_start_rdp(self, data):
+    """Start RDP server with improved state management"""
     try:
-        # Initial screen capture and send
-        ...
+        # Force close any existing RDP server
+        if self.rdp_server is not None:
+            try:
+                logging.info("Stopping existing RDP server before starting a new one")
+                self.rdp_server.stop()
+                self.rdp_server = None
+
+                # If there's a thread, wait for it to terminate
+                if self.rdp_thread and self.rdp_thread.is_alive():
+                    self.rdp_thread.join(timeout=2)
+                    self.rdp_thread = None
+
+                # Additional sleep to ensure resources are released
+                time.sleep(1)
+            except Exception as e:
+                logging.error(f"Error stopping existing RDP server: {str(e)}")
+
+        # Use the actual server's IP for the RDP connection
+        rdp_host = socket.gethostbyname(socket.gethostname())
+        rdp_port = 5900  # Default RDP port
+
+        # Create and start RDP server
+        self.rdp_server = RDPServer(host='0.0.0.0', port=rdp_port)
+        self.rdp_thread = threading.Thread(target=self.rdp_server.start)
+        self.rdp_thread.daemon = True
+        self.rdp_thread.start()
+
+        # Wait for server to start
+        time.sleep(1.5)  # Increased wait time for server startup
+
+        return {
+            'status': 'success',
+            'data': {
+                'ip': rdp_host,
+                'port': rdp_port
+            }
+        }
+
     except Exception as e:
-        print(f"Display handling error: {e}")
-    finally:
-        conn.close()  # Ensure the connection is closed
+        logging.error(f"Failed to start RDP server: {str(e)}")
+        # Clean up in case of error
+        if hasattr(self, 'rdp_server') and self.rdp_server:
+            try:
+                self.rdp_server.stop()
+                self.rdp_server = None
+            except:
+                pass
+        return {
+            'status': 'error',
+            'message': str(e)
+        }
