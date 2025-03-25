@@ -103,6 +103,10 @@ class MCCClient(ctk.CTk):
         self.connections = {}
         self.active_connection = None
 
+        self.last_cpu_percent = None
+        self.last_memory_percent = None
+        self.last_disk_usage = {}
+
         self.title("Multi Computers Control")
         self.geometry("1200x800")
 
@@ -120,10 +124,9 @@ class MCCClient(ctk.CTk):
         self.rdp_socket = None
         self.rdp_display_thread = None
         self.rdp_connection = None
-        self.is_fullscreen = False
-        self.fullscreen_window = None
 
         self.create_gui()
+        self.software_loaded_for = None  # Track which connection has loaded software
 
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
@@ -419,6 +422,7 @@ class MCCClient(ctk.CTk):
             ).pack(pady=5)
 
     def create_remote_desktop_tab(self):
+        """Create a simplified remote desktop tab"""
         remote_desktop_frame = ctk.CTkFrame(self.notebook)
         self.notebook.add(remote_desktop_frame, text="Remote Desktop")
 
@@ -443,23 +447,12 @@ class MCCClient(ctk.CTk):
         )
         self.rdt_status.pack(side=tk.TOP, anchor="w", padx=5, pady=2)
 
-        # Create a fixed-size container for the RDP display
-        # This will limit the size of the RDP display to 50% of the screen size
-        screen_width = self.winfo_screenwidth() // 2
-        screen_height = self.winfo_screenheight() // 2
+        # Create main display frame that takes most of the space, leaving room for buttons at bottom
+        main_display_container = ctk.CTkFrame(remote_desktop_frame)
+        main_display_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        self.rdp_container = ctk.CTkFrame(
-            remote_desktop_frame,
-            width=screen_width,
-            height=screen_height
-        )
-        self.rdp_container.pack(padx=10, pady=5)
-
-        # Force the container to maintain its size
-        self.rdp_container.pack_propagate(False)
-
-        # Create a frame for the RDP display
-        self.rdp_display_frame = ctk.CTkFrame(self.rdp_container)
+        # Create the RDP display frame inside the main container
+        self.rdp_display_frame = ctk.CTkFrame(main_display_container, fg_color="#242424")
         self.rdp_display_frame.pack(fill=tk.BOTH, expand=True)
 
         # Create a canvas for the RDP display
@@ -480,42 +473,54 @@ class MCCClient(ctk.CTk):
         )
         self.rdp_message.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
 
-        # Button frame at the bottom
-        button_frame = ctk.CTkFrame(remote_desktop_frame)
-        button_frame.pack(fill=tk.X, padx=10, pady=5)
+        # Create a persistent control panel that will always be visible
+        self.rdp_control_panel = ctk.CTkFrame(remote_desktop_frame, height=50)
+        self.rdp_control_panel.pack(fill=tk.X, side=tk.BOTTOM, padx=10, pady=5)
+        # Make sure this frame maintains its height
+        self.rdp_control_panel.pack_propagate(False)
 
-        # Control buttons
+        # Control buttons - now in a persistent panel
         self.rdp_button = ctk.CTkButton(
-            button_frame,
+            self.rdp_control_panel,
             text="Start Remote Desktop",
             command=self.toggle_rdp,
-            width=150
+            width=150,
+            height=30
         )
-        self.rdp_button.pack(side=tk.LEFT, padx=5, pady=5)
+        self.rdp_button.pack(side=tk.LEFT, padx=5, pady=10)
 
         self.rdp_close_button = ctk.CTkButton(
-            button_frame,
+            self.rdp_control_panel,
             text="Close RDP",
             command=self.stop_rdp,
             width=100,
+            height=30,
             fg_color="#FF5555",
             hover_color="#FF0000",
             state="disabled"
         )
-        self.rdp_close_button.pack(side=tk.LEFT, padx=5, pady=5)
+        self.rdp_close_button.pack(side=tk.LEFT, padx=5, pady=10)
 
-        self.fullscreen_button = ctk.CTkButton(
-            button_frame,
-            text="Fullscreen",
-            command=self.toggle_rdp_fullscreen,
-            width=100,
-            state="disabled"
+        # Status indicator on the right
+        self.rdp_status_indicator = ctk.CTkLabel(
+            self.rdp_control_panel,
+            text="Not connected",
+            font=("Helvetica", 12),
+            text_color="#888888"
         )
-        self.fullscreen_button.pack(side=tk.LEFT, padx=5, pady=5)
+        self.rdp_status_indicator.pack(side=tk.RIGHT, padx=10, pady=10)
 
-        # Store original window state for fullscreen toggle
-        self.original_window_state = None
-        self.is_fullscreen = False
+        # Store state for RDP
+        self.rdp_active = False
+        self.rdp_socket = None
+        self.rdp_display_thread = None
+        self.rdp_connection = None
+
+        # Track if this tab is currently active to control keyboard input
+        self.rdp_tab_active = False
+
+        # Add bindings to track when this tab becomes active/inactive
+        self.notebook.bind('<<NotebookTabChanged>>', self.on_tab_change)
 
     def add_connection(self):
         """Add a new remote connection with auto-reconnect support"""
@@ -639,8 +644,16 @@ class MCCClient(ctk.CTk):
         """Handle computer selection"""
         selected = self.computer_list.selection()
         if selected:
-            self.active_connection = selected[0]
-            self.refresh_monitoring()
+            # Check if active connection is changing
+            if self.active_connection != selected[0]:
+                self.active_connection = selected[0]
+                # Reset software loaded state when connection changes
+                self.software_loaded_for = None
+                # If software tab is active, load software for new connection
+                if self.active_tab == "Software":
+                    self.auto_load_software()
+                # Refresh monitoring for new connection
+                self.refresh_monitoring()
         else:
             self.active_connection = None
 
@@ -712,15 +725,17 @@ class MCCClient(ctk.CTk):
             return None
 
     def update_hardware_info(self, data):
-        """Update hardware monitoring displays with widget validation"""
+        """Update hardware monitoring displays with widget validation and value preservation"""
         if not self.monitoring_active:
             return
 
         try:
             # Update CPU usage with validation
             if 'cpu' in self.progress_bars and self.progress_bars['cpu'].winfo_exists():
-                cpu_percent = data.get('cpu_percent', 0)
-                if isinstance(cpu_percent, (int, float)) and 0 <= cpu_percent <= 100:
+                cpu_percent = data.get('cpu_percent')
+
+                # Only update if value is not None and greater than 0
+                if cpu_percent is not None and isinstance(cpu_percent, (int, float)) and cpu_percent > 0:
                     self.progress_bars['cpu'].set(cpu_percent / 100.0)
                     if hasattr(self, 'cpu_label') and self.cpu_label.winfo_exists():
                         self.cpu_label.configure(text=f"{cpu_percent:.1f}%")
@@ -729,29 +744,48 @@ class MCCClient(ctk.CTk):
             if 'mem' in self.progress_bars and self.progress_bars['mem'].winfo_exists():
                 memory_data = data.get('memory_usage', {})
                 if isinstance(memory_data, dict):
-                    memory_percent = memory_data.get('percent', 0)
-                    if isinstance(memory_percent, (int, float)) and 0 <= memory_percent <= 100:
+                    memory_percent = memory_data.get('percent')
+
+                    # Only update if value is not None and greater than 0
+                    if memory_percent is not None and isinstance(memory_percent, (int, float)) and memory_percent > 0:
                         self.progress_bars['mem'].set(memory_percent / 100.0)
                         if hasattr(self, 'mem_label') and self.mem_label.winfo_exists():
                             self.mem_label.configure(text=f"{memory_percent:.1f}%")
 
-            # Only update disk info if we're on the monitoring tab
-            if self.monitoring_active and hasattr(self, 'disk_frame') and self.disk_frame.winfo_exists():
-                # Clear existing disk information
-                for widget in self.disk_frame.winfo_children():
-                    widget.destroy()
+            # Only update disk info if we're on the monitoring tab and there's valid data
+            if (self.monitoring_active and hasattr(self, 'disk_frame') and
+                    self.disk_frame.winfo_exists() and 'disk_usage' in data and data['disk_usage']):
 
-                # Update disk usage
-                self.update_disk_info(data.get('disk_usage', {}))
+                # Don't clear existing disk information if there's no valid data
+                disk_usage = data.get('disk_usage', {})
+                if disk_usage and isinstance(disk_usage, dict) and any(disk_usage.values()):
+                    # Only then update disk info
+                    self.update_disk_info(disk_usage)
 
         except Exception as e:
             print(f"Error updating hardware info: {str(e)}")
 
     def update_disk_info(self, disk_usage):
-        """Separate method for updating disk information"""
+        """Separate method for updating disk information with reduced flicker"""
         try:
             if not isinstance(disk_usage, dict) or not self.monitoring_active:
                 return
+
+            # Check if we already have disks displayed and new data is similar
+            existing_disks = [w for w in self.disk_frame.winfo_children() if isinstance(w, ctk.CTkFrame)]
+
+            # Only recreate UI if data structure has changed significantly
+            if len(existing_disks) > 1:  # Header + at least one disk row
+                drives = disk_usage.keys()
+
+                # If we have roughly the same number of drives, update in place
+                if len(drives) == len(existing_disks) - 1:  # -1 for header
+                    self._update_disk_values(disk_usage, existing_disks)
+                    return
+
+            # Clear existing disk information
+            for widget in self.disk_frame.winfo_children():
+                widget.destroy()
 
             # Create header
             header_frame = ctk.CTkFrame(self.disk_frame)
@@ -819,6 +853,86 @@ class MCCClient(ctk.CTk):
         except Exception as e:
             print(f"Error updating disk info: {str(e)}")
 
+    def _update_disk_values(self, disk_usage, existing_frames):
+        """Update disk values in-place without destroying and recreating widgets"""
+        try:
+            # Skip header frame (first frame)
+            header_frame = existing_frames[0]
+            disk_frames = existing_frames[1:]
+
+            # Update each disk frame with new values if match is found
+            for i, (mount, usage) in enumerate(disk_usage.items()):
+                if not isinstance(usage, dict) or i >= len(disk_frames):
+                    continue
+
+                disk_frame = disk_frames[i]
+                labels = [w for w in disk_frame.winfo_children() if isinstance(w, ctk.CTkLabel)]
+
+                # If structure doesn't match, skip this update
+                if len(labels) < 2:
+                    continue
+
+                try:
+                    total = usage.get('total', 0)
+                    used = usage.get('used', 0)
+                    percent = usage.get('percent', 0)
+
+                    if not all(isinstance(x, (int, float)) for x in [total, used, percent]):
+                        continue
+
+                    # Drive name should stay the same
+                    # [0] = Drive name label
+
+                    # Update values only
+                    # [1] = Total capacity
+                    total_gb = total / (1024 ** 3)
+                    if len(labels) > 1:
+                        labels[1].configure(text=f"{total_gb:.1f} GB")
+
+                    # [2] = Used space
+                    used_gb = used / (1024 ** 3)
+                    if len(labels) > 2:
+                        labels[2].configure(text=f"{used_gb:.1f} GB")
+
+                    # [3] = Free space
+                    free_gb = (total - used) / (1024 ** 3)
+                    if len(labels) > 3:
+                        labels[3].configure(text=f"{free_gb:.1f} GB")
+
+                    # Update percentage frames
+                    percent_frames = [w for w in disk_frame.winfo_children()
+                                      if isinstance(w, ctk.CTkFrame) and w != header_frame]
+
+                    if percent_frames:
+                        percent_frame = percent_frames[0]
+
+                        # Get progress bar
+                        progress_bars = [w for w in percent_frame.winfo_children()
+                                         if isinstance(w, ctk.CTkProgressBar)]
+                        if progress_bars:
+                            progress = progress_bars[0]
+                            progress.set(percent / 100.0)
+
+                            # Update color based on usage
+                            if percent >= 90:
+                                progress.configure(progress_color="red")
+                            elif percent >= 75:
+                                progress.configure(progress_color="orange")
+                            else:
+                                progress.configure(progress_color="green")
+
+                        # Update percentage label
+                        percent_labels = [w for w in percent_frame.winfo_children()
+                                          if isinstance(w, ctk.CTkLabel)]
+                        if percent_labels:
+                            percent_labels[0].configure(text=f"{percent:.1f}%")
+
+                except Exception as disk_error:
+                    print(f"Error updating disk values for {mount}: {str(disk_error)}")
+
+        except Exception as e:
+            print(f"Error in _update_disk_values: {str(e)}")
+
     def update_software_status(self, message):
         """Update status message in software tab"""
         if hasattr(self, 'status_label') and self.status_label.winfo_exists():
@@ -833,12 +947,12 @@ class MCCClient(ctk.CTk):
             logging.error(f"Error updating power status: {str(e)}")
 
     def on_search(self, event=None):
-        """Handle software search"""
+        """Handle software search with case-insensitive matching"""
         if not self.active_connection:
             self.update_software_status("Please select a computer first")
             return
 
-        search_term = self.search_entry.get().strip()
+        search_term = self.search_entry.get().strip().lower()  # Convert search term to lowercase
 
         # Clear the tree
         for item in self.software_tree.get_children():
@@ -854,13 +968,13 @@ class MCCClient(ctk.CTk):
             if response and response.get('status') == 'success':
                 software_list = response.get('data', [])
 
-                # Filter software list based on search term
+                # Filter software list based on search term - case insensitive
                 filtered_list = []
                 for software in software_list:
                     if isinstance(software, dict):
-                        name = software.get('name', '').lower()
-                        version = software.get('version', '').lower()
-                        if search_term.lower() in name or search_term.lower() in version:
+                        name = software.get('name', '').lower()  # Convert name to lowercase
+                        version = software.get('version', '').lower()  # Convert version to lowercase
+                        if search_term in name or search_term in version:
                             filtered_list.append(software)
 
                 # Update the tree with filtered results
@@ -873,7 +987,7 @@ class MCCClient(ctk.CTk):
                 # Update status
                 status = f"Found {len(filtered_list)} software items"
                 if search_term:
-                    status += f" matching '{search_term}'"
+                    status += f" matching '{self.search_entry.get().strip()}'"  # Show original search term
                 self.update_software_status(status)
 
         except Exception as e:
@@ -897,14 +1011,14 @@ class MCCClient(ctk.CTk):
         self.software_tree.heading(col, command=lambda: self.treeview_sort_column(col, not reverse))
 
     def refresh_monitoring(self):
-        """Refresh monitoring data with improved error handling"""
+        """Refresh monitoring data with improved error handling and value preservation"""
         if not self.active_connection:
             return
 
         try:
             response = self.send_command(self.active_connection, 'hardware_monitor', {})
 
-            # Early return if no response
+            # Early return if no response - don't reset values
             if not response:
                 print("No response from server")
                 return
@@ -1138,7 +1252,7 @@ class MCCClient(ctk.CTk):
             self.stop_rdp()
 
     def start_rdp(self):
-        """Start integrated RDP session"""
+        """Start integrated RDP session with enhanced UI feedback"""
         if not self.active_connection:
             self.rdt_status.configure(text="Please select a computer first")
             return
@@ -1150,8 +1264,16 @@ class MCCClient(ctk.CTk):
             if response and response.get('status') == 'success':
                 ip, port = response['data']['ip'], response['data']['port']
 
-                # Update status
+                # Update status with clear feedback
                 self.rdt_status.configure(text="Connecting to remote desktop...")
+
+                # Update status in the control panel
+                if hasattr(self, 'rdp_status_indicator') and self.rdp_status_indicator.winfo_exists():
+                    self.rdp_status_indicator.configure(
+                        text=f"Connecting to {self.connections[self.active_connection]['host']}...",
+                        text_color="#FFAA00"
+                    )
+
                 self.rdp_button.configure(text="Connecting...", state="disabled")
 
                 # Create a socket
@@ -1177,22 +1299,45 @@ class MCCClient(ctk.CTk):
                 # Set up input handlers
                 self.setup_rdp_input_handlers()
 
-                # Update UI
+                # Update UI with successful connection status
                 self.rdt_status.configure(text="Remote desktop session active")
+
+                # Update status in the control panel
+                if hasattr(self, 'rdp_status_indicator') and self.rdp_status_indicator.winfo_exists():
+                    self.rdp_status_indicator.configure(
+                        text=f"Connected to {self.connections[self.active_connection]['host']}",
+                        text_color="#00CC00"  # Green for active connection
+                    )
+
                 self.rdp_button.configure(text="Connected", state="disabled")
                 self.rdp_close_button.configure(state="normal")
-                self.fullscreen_button.configure(state="normal")
             else:
                 self.rdt_status.configure(text="Failed to start remote desktop")
+
+                # Update status in the control panel
+                if hasattr(self, 'rdp_status_indicator') and self.rdp_status_indicator.winfo_exists():
+                    self.rdp_status_indicator.configure(
+                        text="Connection failed",
+                        text_color="#FF0000"  # Red for error
+                    )
+
                 self.rdp_button.configure(text="Start Remote Desktop", state="normal")
         except Exception as e:
             self.rdt_status.configure(text=f"RDP Error: {str(e)}")
+
+            # Update status in the control panel
+            if hasattr(self, 'rdp_status_indicator') and self.rdp_status_indicator.winfo_exists():
+                self.rdp_status_indicator.configure(
+                    text="Connection error",
+                    text_color="#FF0000"  # Red for error
+                )
+
             logging.error(f"RDP error: {str(e)}")
             self.rdp_button.configure(text="Start Remote Desktop", state="normal")
             self.stop_rdp()
 
     def stop_rdp(self):
-        """Stop RDP session"""
+        """Simplified stop RDP function"""
         try:
             self.rdp_active = False
 
@@ -1211,10 +1356,6 @@ class MCCClient(ctk.CTk):
                 if hasattr(self, 'rdp_message') and self.rdp_message.winfo_exists():
                     self.rdp_message.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
 
-            # Exit fullscreen if active
-            if self.is_fullscreen:
-                self.toggle_rdp_fullscreen()
-
             # Stop RDP server
             if self.rdp_connection:
                 self.send_command(self.rdp_connection, 'stop_rdp', {})
@@ -1224,70 +1365,23 @@ class MCCClient(ctk.CTk):
             if hasattr(self, 'rdt_status') and self.rdt_status.winfo_exists():
                 self.rdt_status.configure(text="Remote desktop session ended")
 
-            # Update buttons
+            # Update status indicator
+            if hasattr(self, 'rdp_status_indicator') and self.rdp_status_indicator.winfo_exists():
+                self.rdp_status_indicator.configure(text="Not connected", text_color="#888888")
+
+            # Update buttons - always reset to initial state
             if hasattr(self, 'rdp_button') and self.rdp_button.winfo_exists():
                 self.rdp_button.configure(text="Start Remote Desktop", state="normal")
 
             if hasattr(self, 'rdp_close_button') and self.rdp_close_button.winfo_exists():
                 self.rdp_close_button.configure(state="disabled")
 
-            if hasattr(self, 'fullscreen_button') and self.fullscreen_button.winfo_exists():
-                self.fullscreen_button.configure(state="disabled")
-
         except Exception as e:
             logging.error(f"Error stopping RDP: {str(e)}")
 
-    def toggle_rdp_fullscreen(self):
-        """Toggle fullscreen mode for RDP display"""
-        if not self.rdp_active:
-            return
-
-        try:
-            if not self.is_fullscreen:
-                # Store current window state
-                self.original_window_state = {
-                    'geometry': self.geometry(),
-                    'state': self.state()
-                }
-
-                # Create fullscreen window
-                self.fullscreen_window = tk.Toplevel(self)
-                self.fullscreen_window.title("Remote Desktop (Fullscreen)")
-                self.fullscreen_window.attributes('-fullscreen', True)
-
-                # Move the canvas to the fullscreen window
-                self.rdp_canvas.pack_forget()
-                self.rdp_canvas.pack(in_=self.fullscreen_window, fill=tk.BOTH, expand=True)
-
-                # Add escape key binding to exit fullscreen
-                self.fullscreen_window.bind("<Escape>", lambda e: self.toggle_rdp_fullscreen())
-                self.fullscreen_window.bind("<F11>", lambda e: self.toggle_rdp_fullscreen())
-
-                # Update button text
-                self.fullscreen_button.configure(text="Exit Fullscreen")
-                self.is_fullscreen = True
-
-            else:
-                # Move canvas back to main window
-                self.rdp_canvas.pack_forget()
-                self.rdp_canvas.pack(in_=self.rdp_display_frame, fill=tk.BOTH, expand=True)
-
-                # Destroy fullscreen window
-                if hasattr(self, 'fullscreen_window') and self.fullscreen_window:
-                    self.fullscreen_window.destroy()
-                    self.fullscreen_window = None
-
-                # Update button text
-                self.fullscreen_button.configure(text="Fullscreen")
-                self.is_fullscreen = False
-
-        except Exception as e:
-            logging.error(f"Error toggling fullscreen: {str(e)}")
-            # Ensure we clean up if there's an error
-            self.is_fullscreen = False
-            if hasattr(self, 'fullscreen_window') and self.fullscreen_window:
-                self.fullscreen_window.destroy()
-                self.fullscreen_window = None
+            # Force reset of critical UI elements even if there was an error
+            if hasattr(self, 'rdp_button') and self.rdp_button.winfo_exists():
+                self.rdp_button.configure(text="Start Remote Desktop", state="normal")
 
     def receive_rdp_frame(self):
         """Receive a frame from the RDP server"""
@@ -1323,7 +1417,7 @@ class MCCClient(ctk.CTk):
         return data
 
     def rdp_display_loop(self):
-        """Display loop for RDP with resize handling"""
+        """Display loop for RDP with proper scaling and positioning"""
         try:
             last_image = None
 
@@ -1343,34 +1437,49 @@ class MCCClient(ctk.CTk):
                     # Convert to PIL format
                     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                     pil_img = Image.fromarray(img_rgb)
-                    photo_img = ImageTk.PhotoImage(image=pil_img)
-
-                    # Get the target window for display
-                    target_canvas = self.rdp_canvas
 
                     # Update canvas if it exists
-                    if target_canvas.winfo_exists():
-                        # Get current size of image
-                        img_width, img_height = pil_img.size
+                    if hasattr(self, 'rdp_canvas') and self.rdp_canvas.winfo_exists():
+                        # Store original image dimensions
+                        original_width, original_height = pil_img.size
 
-                        # Configure canvas size to match image
-                        # Only resize if needed to prevent flickering
-                        canvas_width = target_canvas.winfo_width()
-                        canvas_height = target_canvas.winfo_height()
+                        # Get canvas dimensions
+                        canvas_width = self.rdp_canvas.winfo_width()
+                        canvas_height = self.rdp_canvas.winfo_height()
 
-                        if canvas_width != img_width or canvas_height != img_height:
-                            target_canvas.config(width=img_width, height=img_height)
+                        # Only resize if canvas dimensions are valid and different
+                        # from the image dimensions
+                        if (canvas_width > 10 and canvas_height > 10 and
+                                (original_width != canvas_width or original_height != canvas_height)):
+                            # Calculate scale factors for both dimensions
+                            width_scale = canvas_width / original_width
+                            height_scale = canvas_height / original_height
 
-                        # Display image
-                        if not hasattr(target_canvas, 'image_id'):
-                            target_canvas.image_id = target_canvas.create_image(
-                                0, 0, anchor=tk.NW, image=photo_img)
-                        else:
-                            target_canvas.itemconfig(
-                                target_canvas.image_id, image=photo_img)
+                            # Use the smaller scale factor to ensure the image fits
+                            scale = min(width_scale, height_scale)
+
+                            # Calculate new dimensions
+                            new_width = int(original_width * scale)
+                            new_height = int(original_height * scale)
+
+                            # Resize image
+                            pil_img = pil_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+                        # Convert to PhotoImage
+                        photo_img = ImageTk.PhotoImage(image=pil_img)
+
+                        # Calculate position to center the image in the canvas
+                        x_position = (canvas_width - pil_img.width) // 2
+                        y_position = (canvas_height - pil_img.height) // 2
+
+                        # Clear existing content
+                        self.rdp_canvas.delete("all")
+
+                        # Create new image
+                        self.rdp_canvas.create_image(x_position, y_position, anchor=tk.NW, image=photo_img)
 
                         # Keep reference to prevent garbage collection
-                        target_canvas.photo = photo_img
+                        self.rdp_canvas.photo = photo_img
 
                 except socket.timeout:
                     # Timeout is expected, just continue
@@ -1388,25 +1497,61 @@ class MCCClient(ctk.CTk):
             self.after(0, self.stop_rdp)
 
     def setup_rdp_input_handlers(self):
-        """Set up input handlers for RDP"""
+        """Set up input handlers for RDP with tab-aware keyboard handling"""
         if not hasattr(self, 'rdp_canvas') or not self.rdp_canvas.winfo_exists():
             return
 
-        # Mouse constants from clientRDP.py
+        # Mouse constants
         MOUSE_LEFT = 201
         MOUSE_SCROLL = 202
         MOUSE_RIGHT = 203
         MOUSE_MOVE = 204
 
-        # Set focus to canvas
-        self.rdp_canvas.focus_set()
-
-        # Mouse handlers
+        # Mouse event handling is direct and always active when over the canvas
         self.rdp_canvas.bind("<Button-1>", lambda e: self.send_rdp_mouse_event(MOUSE_LEFT, 100, e.x, e.y))
         self.rdp_canvas.bind("<ButtonRelease-1>", lambda e: self.send_rdp_mouse_event(MOUSE_LEFT, 117, e.x, e.y))
         self.rdp_canvas.bind("<Button-3>", lambda e: self.send_rdp_mouse_event(MOUSE_RIGHT, 100, e.x, e.y))
         self.rdp_canvas.bind("<ButtonRelease-3>", lambda e: self.send_rdp_mouse_event(MOUSE_RIGHT, 117, e.x, e.y))
-        self.rdp_canvas.bind("<Motion>", lambda e: self.send_rdp_mouse_event(MOUSE_MOVE, 0, e.x, e.y))
+
+        # Add a scale factor for mouse position to handle resolution differences
+        def scale_mouse_position(event):
+            if not hasattr(self, 'rdp_canvas') or not self.rdp_canvas.winfo_exists():
+                return
+
+            # Get the actual image dimensions if we have them
+            if hasattr(self.rdp_canvas, 'photo') and self.rdp_canvas.photo:
+                img_width = self.rdp_canvas.photo.width()
+                img_height = self.rdp_canvas.photo.height()
+            else:
+                # Default to canvas dimensions if no image
+                img_width = self.rdp_canvas.winfo_width()
+                img_height = self.rdp_canvas.winfo_height()
+
+            # Get canvas dimensions
+            canvas_width = self.rdp_canvas.winfo_width()
+            canvas_height = self.rdp_canvas.winfo_height()
+
+            if canvas_width <= 1 or canvas_height <= 1 or img_width <= 1 or img_height <= 1:
+                # Avoid division by zero
+                self.send_rdp_mouse_event(MOUSE_MOVE, 0, event.x, event.y)
+                return
+
+            # Calculate the scale factors
+            x_scale = img_width / canvas_width
+            y_scale = img_height / canvas_height
+
+            # Scale the coordinates
+            scaled_x = int(event.x * x_scale)
+            scaled_y = int(event.y * y_scale)
+
+            # Send the scaled coordinates
+            self.send_rdp_mouse_event(MOUSE_MOVE, 0, scaled_x, scaled_y)
+
+        # Use the scaled position function for mouse movement
+        self.rdp_canvas.bind("<Motion>", scale_mouse_position)
+
+        # Ensure canvas gets focus when clicked
+        self.rdp_canvas.bind("<Button>", lambda e: self.rdp_canvas.focus_set())
 
         # Mouse wheel
         if sys.platform in ("win32", "darwin"):
@@ -1420,9 +1565,21 @@ class MCCClient(ctk.CTk):
             self.rdp_canvas.bind("<Button-5>",
                                  lambda e: self.send_rdp_mouse_event(MOUSE_SCROLL, 0, e.x, e.y))
 
-        # Keyboard handlers
-        self.rdp_canvas.bind("<KeyPress>", lambda e: self.send_rdp_key_event(e.keysym, 100))
-        self.rdp_canvas.bind("<KeyRelease>", lambda e: self.send_rdp_key_event(e.keysym, 117))
+        # Keyboard events are only processed when RDP tab is active
+        def handle_key_press(event):
+            if self.rdp_tab_active and self.rdp_active:
+                self.send_rdp_key_event(event.keysym, 100)
+
+        def handle_key_release(event):
+            if self.rdp_tab_active and self.rdp_active:
+                self.send_rdp_key_event(event.keysym, 117)
+
+        # Bind keyboard events to the canvas and also to the main window
+        self.rdp_canvas.bind("<KeyPress>", handle_key_press)
+        self.rdp_canvas.bind("<KeyRelease>", handle_key_release)
+
+        # Set focus to the canvas
+        self.rdp_canvas.focus_set()
 
     def send_rdp_mouse_event(self, button, action, x, y):
         """Send mouse event to RDP server"""
@@ -1464,14 +1621,17 @@ class MCCClient(ctk.CTk):
         except Exception as e:
             logging.error(f"Error sending key event: {str(e)}")
 
-    def on_tab_change(self, event):
-        """Handle tab changes with widget state management"""
+    def on_tab_change(self, event=None):
+        """Handle tab changes with improved RDP keyboard handling"""
         try:
             current_tab = self.notebook.select()
             prev_tab = self.active_tab
             self.active_tab = self.notebook.tab(current_tab, "text")
 
             print(f"Tab changed from {prev_tab} to {self.active_tab}")
+
+            # Track if the RDP tab is active to control keyboard handling
+            self.rdp_tab_active = (self.active_tab == "Remote Desktop")
 
             # Handle monitoring tab exit
             if prev_tab == "Monitoring":
@@ -1488,11 +1648,30 @@ class MCCClient(ctk.CTk):
                 if hasattr(self, 'mem_progress'):
                     self.progress_bars['mem'] = self.mem_progress
 
+            # Auto-load software list when entering Software tab
+            if self.active_tab == "Software":
+                self.auto_load_software()
+
             # Update the UI based on the new tab
             self.update_idletasks()
 
         except Exception as e:
             print(f"Error during tab change: {str(e)}")
+
+    def auto_load_software(self):
+        """Automatically load software list if a computer is selected"""
+        try:
+            # Only load if a computer is connected and it's not already loaded for this connection
+            if self.active_connection and self.active_connection != self.software_loaded_for:
+                self.update_software_status("Loading software list...")
+                # Schedule software loading with a small delay to allow UI to update
+                self.after(100, self.refresh_software_list)
+                # Update the tracking variable
+                self.software_loaded_for = self.active_connection
+            elif not self.active_connection:
+                self.update_software_status("Select a computer to view installed software")
+        except Exception as e:
+            logging.error(f"Error auto-loading software: {str(e)}")
 
     def on_closing(self):
         """Handle window closing event"""
