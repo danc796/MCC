@@ -9,6 +9,10 @@ import time
 import logging
 from datetime import datetime
 import sys
+import cv2
+import numpy as np
+from PIL import Image, ImageTk
+import struct
 
 
 class ToastNotification:
@@ -110,6 +114,14 @@ class MCCClient(ctk.CTk):
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s'
         )
+
+        # Initialize RDP attributes
+        self.rdp_active = False
+        self.rdp_socket = None
+        self.rdp_display_thread = None
+        self.rdp_connection = None
+        self.is_fullscreen = False
+        self.fullscreen_window = None
 
         self.create_gui()
 
@@ -410,56 +422,100 @@ class MCCClient(ctk.CTk):
         remote_desktop_frame = ctk.CTkFrame(self.notebook)
         self.notebook.add(remote_desktop_frame, text="Remote Desktop")
 
-        title_frame = ctk.CTkFrame(remote_desktop_frame)
-        title_frame.pack(pady=20)
+        # Top controls frame
+        top_frame = ctk.CTkFrame(remote_desktop_frame)
+        top_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # Title and status
+        title_frame = ctk.CTkFrame(top_frame)
+        title_frame.pack(side=tk.LEFT, fill=tk.Y)
 
         ctk.CTkLabel(
             title_frame,
             text="Remote Desktop Control",
-            font=("Helvetica", 20)
-        ).pack()
+            font=("Helvetica", 16, "bold")
+        ).pack(side=tk.TOP, anchor="w", padx=5)
 
         self.rdt_status = ctk.CTkLabel(
             title_frame,
             text="Select computer and activate the remote desktop",
             font=("Helvetica", 12)
         )
-        self.rdt_status.pack(pady=10)
+        self.rdt_status.pack(side=tk.TOP, anchor="w", padx=5, pady=2)
 
-        # Add scale control frame
-        scale_frame = ctk.CTkFrame(remote_desktop_frame)
-        scale_frame.pack(pady=10)
+        # Create a fixed-size container for the RDP display
+        # This will limit the size of the RDP display to 50% of the screen size
+        screen_width = self.winfo_screenwidth() // 2
+        screen_height = self.winfo_screenheight() // 2
 
-        ctk.CTkLabel(
-            scale_frame,
-            text="Display Scale (%)",
-            font=("Helvetica", 12)
-        ).pack(side=tk.LEFT, padx=5)
-
-        self.scale_slider = ctk.CTkSlider(
-            scale_frame,
-            from_=10,
-            to=100,
-            number_of_steps=90,
-            width=200
+        self.rdp_container = ctk.CTkFrame(
+            remote_desktop_frame,
+            width=screen_width,
+            height=screen_height
         )
-        self.scale_slider.pack(side=tk.LEFT, padx=5)
-        self.scale_slider.set(100)  # Default to 100%
+        self.rdp_container.pack(padx=10, pady=5)
 
-        center_frame = ctk.CTkFrame(remote_desktop_frame)
-        center_frame.pack(expand=True)
+        # Force the container to maintain its size
+        self.rdp_container.pack_propagate(False)
 
-        self.rdt_button = ctk.CTkButton(
-            center_frame,
-            text="Activate Remote Desktop",
-            command=self.start_rdp,
-            width=200,
-            height=40
+        # Create a frame for the RDP display
+        self.rdp_display_frame = ctk.CTkFrame(self.rdp_container)
+        self.rdp_display_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Create a canvas for the RDP display
+        self.rdp_canvas = tk.Canvas(
+            self.rdp_display_frame,
+            bg="black",
+            highlightthickness=0,
+            borderwidth=0
         )
-        self.rdt_button.pack(pady=20)
+        self.rdp_canvas.pack(fill=tk.BOTH, expand=True)
 
-        stats_frame = ctk.CTkFrame(remote_desktop_frame)
-        stats_frame.pack(fill=tk.X, padx=5, pady=5)
+        # Create a message for when no RDP is active
+        self.rdp_message = ctk.CTkLabel(
+            self.rdp_canvas,
+            text="Remote Desktop Viewer\nClick 'Start Remote Desktop' to connect",
+            font=("Helvetica", 16),
+            text_color="white"
+        )
+        self.rdp_message.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+
+        # Button frame at the bottom
+        button_frame = ctk.CTkFrame(remote_desktop_frame)
+        button_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # Control buttons
+        self.rdp_button = ctk.CTkButton(
+            button_frame,
+            text="Start Remote Desktop",
+            command=self.toggle_rdp,
+            width=150
+        )
+        self.rdp_button.pack(side=tk.LEFT, padx=5, pady=5)
+
+        self.rdp_close_button = ctk.CTkButton(
+            button_frame,
+            text="Close RDP",
+            command=self.stop_rdp,
+            width=100,
+            fg_color="#FF5555",
+            hover_color="#FF0000",
+            state="disabled"
+        )
+        self.rdp_close_button.pack(side=tk.LEFT, padx=5, pady=5)
+
+        self.fullscreen_button = ctk.CTkButton(
+            button_frame,
+            text="Fullscreen",
+            command=self.toggle_rdp_fullscreen,
+            width=100,
+            state="disabled"
+        )
+        self.fullscreen_button.pack(side=tk.LEFT, padx=5, pady=5)
+
+        # Store original window state for fullscreen toggle
+        self.original_window_state = None
+        self.is_fullscreen = False
 
     def add_connection(self):
         """Add a new remote connection with auto-reconnect support"""
@@ -1074,46 +1130,339 @@ class MCCClient(ctk.CTk):
 
         logging.info("Resource monitoring stopped")
 
+    def toggle_rdp(self):
+        """Toggle RDP session on/off"""
+        if not self.rdp_active:
+            self.start_rdp()
+        else:
+            self.stop_rdp()
+
     def start_rdp(self):
+        """Start integrated RDP session"""
         if not self.active_connection:
             self.rdt_status.configure(text="Please select a computer first")
             return
 
-        # Get the scale value from the GUI
-        scale_value = self.scale_slider.get() / 100.0
+        try:
+            # Request RDP server start
+            response = self.send_command(self.active_connection, 'start_rdp', {})
 
-        # Request RDP server start
-        response = self.send_command(self.active_connection, 'start_rdp', {'scale': scale_value})
-
-        if response and response.get('status') == 'success':
-            ip, port = response['data']['ip'], response['data']['port']
-
-            try:
-                # Start RDP client in a new process
-                import subprocess
-                rdp_process = subprocess.Popen([
-                    sys.executable,
-                    'clientRDP.py',
-                    '--host', ip,
-                    '--port', str(port),
-                    '--scale', str(scale_value)
-                ])
+            if response and response.get('status') == 'success':
+                ip, port = response['data']['ip'], response['data']['port']
 
                 # Update status
+                self.rdt_status.configure(text="Connecting to remote desktop...")
+                self.rdp_button.configure(text="Connecting...", state="disabled")
+
+                # Create a socket
+                self.rdp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.rdp_socket.settimeout(5.0)
+                self.rdp_socket.connect((ip, port))
+
+                # Send platform info
+                platform_code = b'win' if sys.platform == "win32" else b'osx' if sys.platform == "darwin" else b'x11'
+                self.rdp_socket.sendall(platform_code)
+
+                # Hide the welcome message
+                if hasattr(self, 'rdp_message') and self.rdp_message.winfo_exists():
+                    self.rdp_message.place_forget()
+
+                # Set up display thread
+                self.rdp_active = True
+                self.rdp_connection = self.active_connection
+                self.rdp_display_thread = threading.Thread(target=self.rdp_display_loop)
+                self.rdp_display_thread.daemon = True
+                self.rdp_display_thread.start()
+
+                # Set up input handlers
+                self.setup_rdp_input_handlers()
+
+                # Update UI
                 self.rdt_status.configure(text="Remote desktop session active")
+                self.rdp_button.configure(text="Connected", state="disabled")
+                self.rdp_close_button.configure(state="normal")
+                self.fullscreen_button.configure(state="normal")
+            else:
+                self.rdt_status.configure(text="Failed to start remote desktop")
+                self.rdp_button.configure(text="Start Remote Desktop", state="normal")
+        except Exception as e:
+            self.rdt_status.configure(text=f"RDP Error: {str(e)}")
+            logging.error(f"RDP error: {str(e)}")
+            self.rdp_button.configure(text="Start Remote Desktop", state="normal")
+            self.stop_rdp()
 
-                # Wait for RDP session to end
-                rdp_process.wait()
+    def stop_rdp(self):
+        """Stop RDP session"""
+        try:
+            self.rdp_active = False
 
-                # Clean up RDP server
-                self.send_command(self.active_connection, 'stop_rdp', {})
+            # Close socket
+            if self.rdp_socket:
+                try:
+                    self.rdp_socket.close()
+                except:
+                    pass
+                self.rdp_socket = None
+
+            # Clear display
+            if hasattr(self, 'rdp_canvas') and self.rdp_canvas.winfo_exists():
+                self.rdp_canvas.delete("all")
+                # Show welcome message again
+                if hasattr(self, 'rdp_message') and self.rdp_message.winfo_exists():
+                    self.rdp_message.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+
+            # Exit fullscreen if active
+            if self.is_fullscreen:
+                self.toggle_rdp_fullscreen()
+
+            # Stop RDP server
+            if self.rdp_connection:
+                self.send_command(self.rdp_connection, 'stop_rdp', {})
+                self.rdp_connection = None
+
+            # Update status
+            if hasattr(self, 'rdt_status') and self.rdt_status.winfo_exists():
                 self.rdt_status.configure(text="Remote desktop session ended")
 
+            # Update buttons
+            if hasattr(self, 'rdp_button') and self.rdp_button.winfo_exists():
+                self.rdp_button.configure(text="Start Remote Desktop", state="normal")
+
+            if hasattr(self, 'rdp_close_button') and self.rdp_close_button.winfo_exists():
+                self.rdp_close_button.configure(state="disabled")
+
+            if hasattr(self, 'fullscreen_button') and self.fullscreen_button.winfo_exists():
+                self.fullscreen_button.configure(state="disabled")
+
+        except Exception as e:
+            logging.error(f"Error stopping RDP: {str(e)}")
+
+    def toggle_rdp_fullscreen(self):
+        """Toggle fullscreen mode for RDP display"""
+        if not self.rdp_active:
+            return
+
+        try:
+            if not self.is_fullscreen:
+                # Store current window state
+                self.original_window_state = {
+                    'geometry': self.geometry(),
+                    'state': self.state()
+                }
+
+                # Create fullscreen window
+                self.fullscreen_window = tk.Toplevel(self)
+                self.fullscreen_window.title("Remote Desktop (Fullscreen)")
+                self.fullscreen_window.attributes('-fullscreen', True)
+
+                # Move the canvas to the fullscreen window
+                self.rdp_canvas.pack_forget()
+                self.rdp_canvas.pack(in_=self.fullscreen_window, fill=tk.BOTH, expand=True)
+
+                # Add escape key binding to exit fullscreen
+                self.fullscreen_window.bind("<Escape>", lambda e: self.toggle_rdp_fullscreen())
+                self.fullscreen_window.bind("<F11>", lambda e: self.toggle_rdp_fullscreen())
+
+                # Update button text
+                self.fullscreen_button.configure(text="Exit Fullscreen")
+                self.is_fullscreen = True
+
+            else:
+                # Move canvas back to main window
+                self.rdp_canvas.pack_forget()
+                self.rdp_canvas.pack(in_=self.rdp_display_frame, fill=tk.BOTH, expand=True)
+
+                # Destroy fullscreen window
+                if hasattr(self, 'fullscreen_window') and self.fullscreen_window:
+                    self.fullscreen_window.destroy()
+                    self.fullscreen_window = None
+
+                # Update button text
+                self.fullscreen_button.configure(text="Fullscreen")
+                self.is_fullscreen = False
+
+        except Exception as e:
+            logging.error(f"Error toggling fullscreen: {str(e)}")
+            # Ensure we clean up if there's an error
+            self.is_fullscreen = False
+            if hasattr(self, 'fullscreen_window') and self.fullscreen_window:
+                self.fullscreen_window.destroy()
+                self.fullscreen_window = None
+
+    def receive_rdp_frame(self):
+        """Receive a frame from the RDP server"""
+        # Get header
+        header = self.receive_exact(5)
+        img_type, length = struct.unpack(">BI", header)
+
+        # Get image data
+        img_data = b''
+        buffer_size = 10240
+        while length > 0:
+            chunk_size = min(buffer_size, length)
+            chunk = self.receive_exact(chunk_size)
+            img_data += chunk
+            length -= len(chunk)
+
+        return img_type, img_data
+
+    def receive_exact(self, size):
+        """Receive exact number of bytes"""
+        data = b''
+        while len(data) < size and self.rdp_active:
+            try:
+                chunk = self.rdp_socket.recv(size - len(data))
+                if not chunk:
+                    raise ConnectionError("Connection lost")
+                data += chunk
+            except socket.timeout:
+                continue
             except Exception as e:
-                self.rdt_status.configure(text=f"RDP Error: {str(e)}")
-                logging.error(f"RDP error: {str(e)}")
+                logging.error(f"Error receiving data: {str(e)}")
+                raise
+        return data
+
+    def rdp_display_loop(self):
+        """Display loop for RDP with resize handling"""
+        try:
+            last_image = None
+
+            while self.rdp_active:
+                try:
+                    img_type, img_data = self.receive_rdp_frame()
+
+                    # Process image
+                    np_arr = np.frombuffer(img_data, dtype=np.uint8)
+                    img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+                    if img_type == 0 and last_image is not None:  # Diff frame
+                        img = cv2.bitwise_xor(last_image, img)
+
+                    last_image = img.copy()
+
+                    # Convert to PIL format
+                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    pil_img = Image.fromarray(img_rgb)
+                    photo_img = ImageTk.PhotoImage(image=pil_img)
+
+                    # Get the target window for display
+                    target_canvas = self.rdp_canvas
+
+                    # Update canvas if it exists
+                    if target_canvas.winfo_exists():
+                        # Get current size of image
+                        img_width, img_height = pil_img.size
+
+                        # Configure canvas size to match image
+                        # Only resize if needed to prevent flickering
+                        canvas_width = target_canvas.winfo_width()
+                        canvas_height = target_canvas.winfo_height()
+
+                        if canvas_width != img_width or canvas_height != img_height:
+                            target_canvas.config(width=img_width, height=img_height)
+
+                        # Display image
+                        if not hasattr(target_canvas, 'image_id'):
+                            target_canvas.image_id = target_canvas.create_image(
+                                0, 0, anchor=tk.NW, image=photo_img)
+                        else:
+                            target_canvas.itemconfig(
+                                target_canvas.image_id, image=photo_img)
+
+                        # Keep reference to prevent garbage collection
+                        target_canvas.photo = photo_img
+
+                except socket.timeout:
+                    # Timeout is expected, just continue
+                    continue
+                except ConnectionError:
+                    break
+                except Exception as e:
+                    logging.error(f"Error in RDP display loop: {str(e)}")
+                    break
+
+        except Exception as e:
+            logging.error(f"RDP display error: {str(e)}")
+        finally:
+            # Clean up on exit
+            self.after(0, self.stop_rdp)
+
+    def setup_rdp_input_handlers(self):
+        """Set up input handlers for RDP"""
+        if not hasattr(self, 'rdp_canvas') or not self.rdp_canvas.winfo_exists():
+            return
+
+        # Mouse constants from clientRDP.py
+        MOUSE_LEFT = 201
+        MOUSE_SCROLL = 202
+        MOUSE_RIGHT = 203
+        MOUSE_MOVE = 204
+
+        # Set focus to canvas
+        self.rdp_canvas.focus_set()
+
+        # Mouse handlers
+        self.rdp_canvas.bind("<Button-1>", lambda e: self.send_rdp_mouse_event(MOUSE_LEFT, 100, e.x, e.y))
+        self.rdp_canvas.bind("<ButtonRelease-1>", lambda e: self.send_rdp_mouse_event(MOUSE_LEFT, 117, e.x, e.y))
+        self.rdp_canvas.bind("<Button-3>", lambda e: self.send_rdp_mouse_event(MOUSE_RIGHT, 100, e.x, e.y))
+        self.rdp_canvas.bind("<ButtonRelease-3>", lambda e: self.send_rdp_mouse_event(MOUSE_RIGHT, 117, e.x, e.y))
+        self.rdp_canvas.bind("<Motion>", lambda e: self.send_rdp_mouse_event(MOUSE_MOVE, 0, e.x, e.y))
+
+        # Mouse wheel
+        if sys.platform in ("win32", "darwin"):
+            self.rdp_canvas.bind("<MouseWheel>",
+                                 lambda e: self.send_rdp_mouse_event(MOUSE_SCROLL,
+                                                                     1 if e.delta > 0 else 0,
+                                                                     e.x, e.y))
         else:
-            self.rdt_status.configure(text="Failed to start remote desktop")
+            self.rdp_canvas.bind("<Button-4>",
+                                 lambda e: self.send_rdp_mouse_event(MOUSE_SCROLL, 1, e.x, e.y))
+            self.rdp_canvas.bind("<Button-5>",
+                                 lambda e: self.send_rdp_mouse_event(MOUSE_SCROLL, 0, e.x, e.y))
+
+        # Keyboard handlers
+        self.rdp_canvas.bind("<KeyPress>", lambda e: self.send_rdp_key_event(e.keysym, 100))
+        self.rdp_canvas.bind("<KeyRelease>", lambda e: self.send_rdp_key_event(e.keysym, 117))
+
+    def send_rdp_mouse_event(self, button, action, x, y):
+        """Send mouse event to RDP server"""
+        if not self.rdp_active or not self.rdp_socket:
+            return
+
+        try:
+            self.rdp_socket.sendall(struct.pack('>BBHH', button, action, x, y))
+        except Exception as e:
+            logging.error(f"Error sending mouse event: {str(e)}")
+            self.stop_rdp()
+
+    def send_rdp_key_event(self, key, action):
+        """Send keyboard event to RDP server - simplified implementation"""
+        if not self.rdp_active or not self.rdp_socket:
+            return
+
+        try:
+            # Simple mapping of common keys to scan codes
+            # This is a basic implementation - a full implementation would map all keys
+            key_map = {
+                'a': 30, 'b': 48, 'c': 46, 'd': 32, 'e': 18, 'f': 33, 'g': 34, 'h': 35,
+                'i': 23, 'j': 36, 'k': 37, 'l': 38, 'm': 50, 'n': 49, 'o': 24, 'p': 25,
+                'q': 16, 'r': 19, 's': 31, 't': 20, 'u': 22, 'v': 47, 'w': 17, 'x': 45,
+                'y': 21, 'z': 44, '1': 2, '2': 3, '3': 4, '4': 5, '5': 6, '6': 7, '7': 8,
+                '8': 9, '9': 10, '0': 11, 'space': 57, 'Return': 28, 'Escape': 1,
+                'BackSpace': 14, 'Tab': 15, 'Left': 75, 'Right': 77, 'Up': 72, 'Down': 80
+            }
+
+            # Convert key to lowercase for consistency
+            key_lower = key.lower()
+
+            # Get scan code
+            scan_code = key_map.get(key_lower, key_map.get(key, 0))
+
+            # Send key event
+            if scan_code > 0:
+                self.rdp_socket.sendall(struct.pack('>BBHH', scan_code, action, 0, 0))
+        except Exception as e:
+            logging.error(f"Error sending key event: {str(e)}")
 
     def on_tab_change(self, event):
         """Handle tab changes with widget state management"""
