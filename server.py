@@ -368,9 +368,6 @@ class MCCServer:
             rdp_host = socket.gethostbyname(socket.gethostname())
             rdp_port = 5900  # Default RDP port
 
-            # Get scale parameter from client (if provided)
-            scale = data.get('scale', 1.0)
-
             # Create and start RDP server
             self.rdp_server = RDPServer(host='0.0.0.0', port=rdp_port)
             self.rdp_thread = threading.Thread(target=self.rdp_server.start)
@@ -384,8 +381,7 @@ class MCCServer:
                 'status': 'success',
                 'data': {
                     'ip': rdp_host,
-                    'port': rdp_port,
-                    'scale': scale
+                    'port': rdp_port
                 }
             }
 
