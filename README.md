@@ -41,9 +41,6 @@ Features:
 8. Remote Desktop:
    - Access and control any computer in the network remotely.
 
-9. System Notifications: ---1
-   - Send pop-up notifications to one or multiple computers.
-
-10. Process Management: ---1,2
+9. Process Management: ---1,2
    - View and manage running processes on connected computers.
    - Terminate unresponsive or unauthorized processes remotely.
